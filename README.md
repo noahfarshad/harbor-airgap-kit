@@ -86,7 +86,7 @@ renewals.
 
 ## A new environment
 
-`inventories/example` is filled the way the essential.coach lab records a site:
+`inventories/coach-dev` is the multi-environment example space, filled as `registry.example.coach`. `inventories/example` is the single inventory with Broadcom items turned on:
 `registry01.example.coach`, Nexus off, a staged certificate, Podman, and a few
 Broadcom items turned on. Copy that directory, or the blank template, and
 replace `example.coach`. The build will not start while a `CHANGE_ME` is left.

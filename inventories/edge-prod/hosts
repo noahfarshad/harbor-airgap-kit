@@ -1,0 +1,16 @@
+# Fill this environment on that site. Do not commit site names or addresses
+# into the shared repository. Copy coach-dev and replace example.coach.
+# inventories/edge-prod/hosts
+#
+# One environment. Copy this directory to inventories/edge-prod and replace every
+# CHANGE_ME.
+#
+# One group per kind of server; each group's settings live in group_vars/<group>/
+# and each server's in host_vars/<host>.yml. registry01 is the registry's name in
+# this inventory: rename it here and rename host_vars/registry01.yml to match.
+
+[registry]
+registry01
+
+[linux:children]
+registry
