@@ -44,7 +44,16 @@ PowerShell -ExecutionPolicy Bypass -File .\lab\windows\New-HarborLab.ps1 -Demo
 
 That sets up a separate WSL distribution called `harbor-lab` and runs
 everything in it. Add `-Runtime docker` to put Harbor on Docker CE instead of
-Podman. On an AlmaLinux, Rocky or RHEL 9 VM, run this as root from this folder:
+Podman. Switch later with:
+
+```powershell
+wsl -d harbor-lab -- make -C /opt/harbor-airgap-kit lab-demo RUNTIME=docker
+wsl -d harbor-lab -- make -C /opt/harbor-airgap-kit lab-demo RUNTIME=podman
+wsl --terminate harbor-lab
+```
+
+On a VM, the same switch is `make lab-demo RUNTIME=docker` or `RUNTIME=podman`.
+`docs/LAB.md` has the certificate import and the rest. On an AlmaLinux, Rocky or RHEL 9 VM, run this as root from this folder:
 
 ```bash
 bash lab/bootstrap.sh && make lab-demo

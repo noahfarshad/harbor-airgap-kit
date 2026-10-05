@@ -61,7 +61,9 @@ After that:
 wsl -d harbor-lab                                                        # root shell in the lab
 wsl -d harbor-lab -- make -C /opt/harbor-airgap-kit lab-demo
 wsl -d harbor-lab -- make -C /opt/harbor-airgap-kit lab-demo RUNTIME=docker
+wsl -d harbor-lab -- make -C /opt/harbor-airgap-kit lab-demo RUNTIME=podman
 wsl -d harbor-lab -- make -C /opt/harbor-airgap-kit lab-info
+wsl --terminate harbor-lab
 ```
 
 WSL normally stops a distribution about 15 seconds after the last command
@@ -101,7 +103,9 @@ On AlmaLinux, Rocky or RHEL 9, as root, from this folder:
 
 ```bash
 bash lab/bootstrap.sh
-make lab-demo                  # or: make lab-demo RUNTIME=docker
+make lab-demo
+make lab-demo RUNTIME=docker
+make lab-demo RUNTIME=podman
 ```
 
 ## What lab-demo does

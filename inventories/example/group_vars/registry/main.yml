@@ -15,8 +15,14 @@
 # Container runtime
 # =============================================================================
 harbor_container_runtime:        podman            # podman | docker
-harbor_podman_compose_provider:  podman-compose    # must match the transfer (kit.yml harbor.compose_provider):
-                                                   # podman-compose (EPEL RPMs) | docker-compose (one static binary)
+# Switch runtime only after a remove. Docker CE has to be available first
+# (the server's repos, or docker_ce.enabled: true in kit.yml). Then:
+#   make remove-registry ENV=example
+#   set harbor_container_runtime: docker
+#   make build-registry ENV=example
+# The lab does this for you: make lab-demo RUNTIME=docker, and RUNTIME=podman moves it back.
+harbor_podman_compose_provider:  docker-compose  # must match kit.yml harbor.compose_provider
+                                                   # docker-compose (one static binary) | podman-compose (EPEL RPMs)
 harbor_podman_socket:            /run/podman/podman.sock   # used by the docker-compose provider
 harbor_podman_log_driver:        journald          # Podman has no syslog driver
 harbor_compose_project:          harbor
