@@ -1,0 +1,66 @@
+---
+# vars file for configure_nexus
+#
+# The repositories, roles and accounts, built from the defaults. Fixed shape;
+# change the defaults, not these.
+
+configure_nexus_repositories: >-
+  {{ [configure_nexus_raw_spec]
+     + ([configure_nexus_yum_spec] if nexus_yum_repo_enabled | bool else []) }}
+
+configure_nexus_raw_spec:
+  format: raw
+  body:
+    name: "{{ nexus_raw_repo }}"
+    online: true
+    storage:
+      blobStoreName: "{{ nexus_blob_store }}"
+      strictContentTypeValidation: false
+      writePolicy: allow                       # each new transfer replaces SHA256SUMS and the manifest
+    raw:
+      contentDisposition: ATTACHMENT
+
+configure_nexus_yum_spec:
+  format: yum
+  body:
+    name: "{{ nexus_yum_repo }}"
+    online: true
+    storage:
+      blobStoreName: "{{ nexus_blob_store }}"
+      strictContentTypeValidation: true
+      writePolicy: allow
+    yum:
+      repodataDepth: "{{ nexus_yum_repodata_depth | int }}"
+      deployPolicy: STRICT
+
+# nx-repository-view-<format>-<repository>-<action>, for every repository
+configure_nexus_repo_keys: >-
+  {{ configure_nexus_repositories | map(attribute='format')
+     | zip(configure_nexus_repositories | map(attribute='body.name'))
+     | map('join', '-') | list }}
+
+configure_nexus_read_privileges: >-
+  {{ configure_nexus_repo_keys | product(['read', 'browse']) | map('join', '-')
+     | map('regex_replace', '^', 'nx-repository-view-') | list }}
+
+configure_nexus_upload_privileges: >-
+  {{ configure_nexus_repo_keys | product(['read', 'browse', 'add', 'edit']) | map('join', '-')
+     | map('regex_replace', '^', 'nx-repository-view-') | list }}
+
+configure_nexus_roles:
+  - id: "{{ nexus_read_role }}"
+    description: "harbor-airgap-kit: read the Harbor files (Ansible and dnf)"
+    privileges: "{{ configure_nexus_read_privileges }}"
+  - id: "{{ nexus_upload_role }}"
+    description: "harbor-airgap-kit: upload the Harbor files (kit publish)"
+    privileges: "{{ configure_nexus_upload_privileges }}"
+
+# Account names are looped over; passwords and roles are looked up by name, so
+# no password ever appears in a loop item or a task's output.
+configure_nexus_user_ids:
+  - "{{ nexus_read_user }}"
+  - "{{ nexus_upload_user }}"
+
+configure_nexus_user_map: >-
+  {{ {nexus_read_user: {'password': nexus_read_password, 'role': nexus_read_role},
+      nexus_upload_user: {'password': nexus_upload_password, 'role': nexus_upload_role}} }}

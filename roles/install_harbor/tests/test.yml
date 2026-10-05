@@ -1,0 +1,6 @@
+---
+- name: Smoke-test install_harbor
+  hosts: localhost
+  remote_user: root
+  roles:
+    - install_harbor

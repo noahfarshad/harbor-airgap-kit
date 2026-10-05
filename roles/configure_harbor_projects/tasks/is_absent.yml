@@ -1,0 +1,21 @@
+---
+# tasks file for configure_harbor_projects: absent
+#
+# Harbor refuses to delete a project that still holds repositories, so this
+# only removes empty projects. That is deliberate.
+
+- name: Delete the projects
+  ansible.builtin.uri:
+    url: "{{ harbor_api_url }}/projects/{{ item.name }}"
+    method: DELETE
+    force_basic_auth: true
+    url_username: admin
+    url_password: "{{ harbor_admin_password }}"
+    validate_certs: "{{ harbor_api_validate_certs }}"
+    status_code: [200, 404, 412]
+  loop: "{{ harbor_projects }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: harbor_projects_deleted
+  changed_when: harbor_projects_deleted.status == 200
+  no_log: true

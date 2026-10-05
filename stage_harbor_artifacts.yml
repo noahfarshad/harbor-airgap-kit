@@ -1,0 +1,25 @@
+---
+# stage_harbor_artifacts.yml
+#
+# CONNECTED SIDE ONLY. Downloads the Harbor offline installer, checks its
+# release signature, adds the compose provider packages, and writes the files to
+# artifacts/harbor/ with harbor_artifacts.yml (version + sha256) and SHA256SUMS.
+# Settings: inventories/connected/group_vars/all/stage.yml.
+#
+# Usage:
+#   make stage-harbor
+#   # or:
+#   ansible-playbook -i inventories/connected/hosts stage_harbor_artifacts.yml
+#
+# Output: artifacts/harbor/. Carry it across, then run make pull-harbor inside
+# the environment.
+
+- name: Put the Harbor files together for a transfer
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    desired_state: present
+
+  roles:
+    - { role: stage_harbor_artifacts, tags: [stage_harbor_artifacts] }

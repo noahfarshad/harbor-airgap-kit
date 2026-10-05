@@ -1,0 +1,89 @@
+---
+# tasks file for configure_harbor_projects: present
+
+# Harbor's /health answers 200 as soon as core is up, while other components
+# are still starting and report "unhealthy". Wait for the overall status, not
+# just the HTTP code, so a first deploy doesn't fail on that race.
+- name: Wait for Harbor to report healthy
+  block:
+    - name: Poll the health endpoint until every component is healthy
+      ansible.builtin.uri:
+        url: "{{ harbor_api_url }}/health"
+        validate_certs: "{{ harbor_api_validate_certs }}"
+        status_code: 200
+      register: harbor_projects_health
+      retries: "{{ harbor_api_wait_retries }}"
+      delay: "{{ harbor_api_wait_delay }}"
+      until:
+        - harbor_projects_health.status | default(0) == 200
+        - (harbor_projects_health.json | default({})).status | default('') == 'healthy'
+      changed_when: false
+  rescue:
+    - name: Stop with the components that are not healthy
+      ansible.builtin.fail:
+        msg: >-
+          Harbor did not report healthy within
+          {{ (harbor_api_wait_retries | int) * (harbor_api_wait_delay | int) }} seconds.
+          HTTP {{ harbor_projects_health.status | default('no answer') }};
+          not healthy: {{ (harbor_projects_health.json | default({})).components | default([])
+                          | rejectattr('status', 'equalto', 'healthy') | map(attribute='name') | join(', ') }}.
+          Check the containers with: {{ harbor_container_runtime | default('podman') }} ps -a, and
+          {{ 'journalctl CONTAINER_NAME=harbor-core' if harbor_container_runtime | default('podman') == 'podman'
+             else '/var/log/harbor/core.log' }}
+
+- name: Create the projects
+  ansible.builtin.uri:
+    url: "{{ harbor_api_url }}/projects"
+    method: POST
+    body_format: json
+    body:
+      project_name: "{{ item.name }}"
+      public: "{{ item.public | default(false) | bool }}"
+      metadata:
+        public: "{{ 'true' if item.public | default(false) | bool else 'false' }}"
+    force_basic_auth: true
+    url_username: admin
+    url_password: "{{ harbor_admin_password }}"
+    validate_certs: "{{ harbor_api_validate_certs }}"
+    status_code: [201, 409]
+  loop: "{{ harbor_projects }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: harbor_projects_created
+  changed_when: harbor_projects_created.status == 201
+  no_log: true
+
+- name: Check the Broadcom items this environment turns on are in the catalog
+  ansible.builtin.assert:
+    that:
+      - harbor_unknown_items | length == 0
+    fail_msg: >-
+      broadcom_items turns on {{ harbor_unknown_items | join(', ') }}, which broadcom/catalog.yml
+      doesn't have. python3 kit catalog lists what it has.
+    quiet: true
+  vars:
+    harbor_unknown_items: >-
+      {{ broadcom_items | dict2items | selectattr('value') | map(attribute='key')
+         | difference(lookup('ansible.builtin.file', harbor_catalog_file) | from_yaml | list) }}
+
+- name: Create the projects the Broadcom items go to
+  ansible.builtin.uri:
+    url: "{{ harbor_api_url }}/projects"
+    method: POST
+    body_format: json
+    body:
+      project_name: "{{ item }}"
+      public: true
+      metadata:
+        public: "true"
+    force_basic_auth: true
+    url_username: admin
+    url_password: "{{ harbor_admin_password }}"
+    validate_certs: "{{ harbor_api_validate_certs }}"
+    status_code: [201, 409]
+  loop: "{{ harbor_item_projects }}"
+  loop_control:
+    label: "{{ item }}"
+  register: harbor_item_projects_created
+  changed_when: harbor_item_projects_created.status == 201
+  no_log: true

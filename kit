@@ -1,0 +1,1601 @@
+#!/usr/bin/env python3
+"""kit: build the transfer for an air-gapped environment from kit.yml, then load it inside.
+
+On the connected workstation (WSL or Linux, with internet access):
+
+  python3 kit check      check kit.yml, the tools, and that every source can be reached
+  python3 kit fetch      download and verify everything into one transfer folder
+  python3 kit catalog    what broadcom/catalog.yml offers, and what each environment turns on
+
+Inside the environment, from the repository the transfer carried in:
+
+  python3 kit verify  --from DIR             check a transfer against its SHA256SUMS
+  python3 kit publish --from DIR --env ENV   verify, stage the Harbor files, upload them
+                                             to Nexus, and stage the Broadcom bundles
+  python3 kit load    --env ENV              after make build-registry: push the Broadcom
+                                             items that environment turns on into Harbor,
+                                             and write the service YAMLs that point at it
+
+Needs python3 (3.6 or later), bash and curl. cosign and imgpkg are installed into
+~/.local/bin when missing, each checked against its release checksums. Nothing
+needs sudo, except creating the staging directory inside the environment.
+
+Exit codes: 0 done, 1 a usage or environment problem, 2 something failed its check.
+"""
+
+import argparse
+import datetime
+import difflib
+import getpass
+import glob
+import hashlib
+import http.client
+import json
+import os
+import platform
+import re
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+REPO = os.path.dirname(os.path.realpath(__file__))
+REPO_NAME = os.path.basename(REPO)          # the folder name: harbor-airgap-kit, or a deployment package's
+LOCAL_BIN = os.path.expanduser("~/.local/bin")
+STAMP = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+USER_AGENT = "harbor-airgap-kit/1"
+
+TOOLS = {
+    "cosign": {"repo": "sigstore/cosign", "asset": "cosign-linux-amd64", "sums": "cosign_checksums.txt"},
+    "imgpkg": {"repo": "carvel-dev/imgpkg", "asset": "imgpkg-linux-amd64", "sums": "checksums.txt"},
+}
+
+DEFAULTS = {
+    "name": None,
+    "output": {"dir": "~/kit-transfer", "windows_copy": True},
+    "tools": {"cosign": "latest", "imgpkg": "latest"},
+    "harbor": {
+        "enabled": True,
+        "version": None,
+        "verify_signature": True,
+        "compose_provider": "podman-compose",
+        "docker_compose_version": "",
+        "epel_mirror": "https://dl.fedoraproject.org/pub/epel/9/Everything/x86_64",
+    },
+    "docker_ce": {"enabled": False, "repo": "https://download.docker.com/linux/rhel/9/x86_64/stable"},
+    "broadcom": {
+        "registry": "projects.packages.broadcom.com",
+        "catalog": "broadcom/catalog.yml",
+        "environments": "all",
+        "services_dir": "broadcom/services",
+        "services_project": "sup-services",
+        "bundles": [],
+    },
+    "files": [],
+}
+
+MANIFEST_TYPES = ", ".join([
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+])
+
+
+# --- output ---------------------------------------------------------------------------
+
+class KitError(Exception):
+    def __init__(self, message, code=1):
+        super(KitError, self).__init__(message)
+        self.code = code
+
+
+def die(message, code=1):
+    raise KitError(message, code)
+
+
+def log(message=""):
+    print("%s  %s" % (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), message), flush=True)
+
+
+def step(title):
+    print("", flush=True)
+    log("==> " + title)
+
+
+def row(status, label, detail="", width=58):
+    print("    %-5s %-*s %s" % (status, width, label, detail), flush=True)
+
+
+def human(size):
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return ("%d %s" % (size, unit)) if unit == "B" else ("%.1f %s" % (size, unit))
+        size /= 1024.0
+    return "%.1f GB" % size
+
+
+# --- YAML -----------------------------------------------------------------------------
+
+class MiniYaml(object):
+    """The block-style YAML kit.yml and the inventories use, for hosts without PyYAML:
+    mappings, lists, quoted and plain scalars, comments, [] and {}."""
+
+    def __init__(self, text, name):
+        self.name = name
+        self.lines = []
+        for number, raw in enumerate(text.splitlines(), 1):
+            if raw.rstrip() in ("---", "..."):
+                continue
+            leading = raw[:len(raw) - len(raw.lstrip())]
+            if "\t" in leading:
+                self.fail(number, "indent with spaces, not tabs")
+            body = self.strip_comment(raw).rstrip()
+            if body.strip():
+                self.lines.append([number, len(body) - len(body.lstrip(" ")), body.strip()])
+        self.pos = 0
+
+    def fail(self, number, message):
+        die("%s, line %s: %s" % (self.name, number, message))
+
+    @staticmethod
+    def strip_comment(line):
+        quote = None
+        i = 0
+        while i < len(line):
+            c = line[i]
+            if quote:
+                if quote == '"' and c == "\\":
+                    i += 2
+                    continue
+                if c == quote:
+                    if quote == "'" and line[i + 1:i + 2] == "'":
+                        i += 2
+                        continue
+                    quote = None
+            elif c in "'\"" and (i == 0 or line[i - 1] in " \t:-[,{"):
+                quote = c
+            elif c == "#" and (i == 0 or line[i - 1] in " \t"):
+                return line[:i]
+            i += 1
+        return line
+
+    def parse(self):
+        if not self.lines:
+            return None
+        value = self.block(self.lines[0][1])
+        if self.pos < len(self.lines):
+            self.fail(self.lines[self.pos][0], "unexpected indentation")
+        return value
+
+    @staticmethod
+    def is_item(content):
+        return content == "-" or content.startswith("- ")
+
+    def block(self, indent):
+        if self.is_item(self.lines[self.pos][2]):
+            return self.sequence(indent)
+        return self.mapping(indent)
+
+    def mapping(self, indent):
+        result = {}
+        while self.pos < len(self.lines):
+            number, ind, content = self.lines[self.pos]
+            if ind < indent or (ind == indent and self.is_item(content)):
+                break
+            if ind > indent:
+                self.fail(number, "unexpected indentation")
+            key, rest = self.split_key(number, content)
+            if key in result:
+                self.fail(number, "%r appears twice" % key)
+            self.pos += 1
+            if rest == "":
+                nxt = self.lines[self.pos] if self.pos < len(self.lines) else None
+                if nxt and (nxt[1] > ind or (nxt[1] == ind and self.is_item(nxt[2]))):
+                    result[key] = self.block(nxt[1])
+                else:
+                    result[key] = None
+            elif rest[0] in "|>":
+                result[key] = self.block_scalar(ind, rest)
+            else:
+                result[key] = self.scalar(number, rest)
+        return result
+
+    def sequence(self, indent):
+        result = []
+        while self.pos < len(self.lines):
+            number, ind, content = self.lines[self.pos]
+            if ind < indent:
+                break
+            if ind > indent or not self.is_item(content):
+                if ind == indent:
+                    break
+                self.fail(number, "unexpected indentation")
+            item = content[1:].lstrip()
+            if item == "":
+                self.pos += 1
+                nxt = self.lines[self.pos] if self.pos < len(self.lines) else None
+                result.append(self.block(nxt[1]) if nxt and nxt[1] > ind else None)
+            elif self.is_mapping_line(item):
+                # "- key: value" starts a mapping whose keys line up under "key"
+                self.lines[self.pos] = [number, ind + len(content) - len(item), item]
+                result.append(self.mapping(self.lines[self.pos][1]))
+            else:
+                self.pos += 1
+                result.append(self.scalar(number, item))
+        return result
+
+    @staticmethod
+    def is_mapping_line(item):
+        return bool(re.match(r"^[^\s'\"\[{#:][^#:]*?:(\s|$)", item))
+
+    def split_key(self, number, content):
+        quote = None
+        for i, c in enumerate(content):
+            if quote:
+                if c == quote:
+                    quote = None
+                continue
+            if i == 0 and c in "'\"":
+                quote = c
+                continue
+            if c == ":" and (i + 1 == len(content) or content[i + 1] == " "):
+                key = content[:i].strip()
+                if len(key) >= 2 and key[0] == key[-1] and key[0] in "'\"":
+                    key = key[1:-1]
+                return key, content[i + 1:].strip()
+        self.fail(number, "expected 'key: value', got %r" % content)
+
+    def block_scalar(self, indent, indicator):
+        parts = []
+        while self.pos < len(self.lines) and self.lines[self.pos][1] > indent:
+            parts.append(self.lines[self.pos][2])
+            self.pos += 1
+        text = ("\n" if indicator[0] == "|" else " ").join(parts)
+        return text if indicator.endswith("-") else text + "\n"
+
+    @staticmethod
+    def split_flow(text):
+        parts, quote, depth, current = [], None, 0, ""
+        for c in text:
+            if quote:
+                quote = None if c == quote else quote
+            elif c in "'\"":
+                quote = c
+            elif c in "[{":
+                depth += 1
+            elif c in "]}":
+                depth -= 1
+            elif c == "," and depth == 0:
+                parts.append(current.strip())
+                current = ""
+                continue
+            current += c
+        if current.strip():
+            parts.append(current.strip())
+        return parts
+
+    def scalar(self, number, text):
+        if text[0] == '"':
+            if len(text) < 2 or text[-1] != '"':
+                self.fail(number, "a double-quoted value is not closed")
+            try:
+                return json.loads(text)
+            except ValueError:
+                return text[1:-1]
+        if text[0] == "'":
+            if len(text) < 2 or text[-1] != "'":
+                self.fail(number, "a single-quoted value is not closed")
+            return text[1:-1].replace("''", "'")
+        if text == "[]":
+            return []
+        if text == "{}":
+            return {}
+        if text[0] == "[" and text[-1] == "]":
+            return [self.scalar(number, part) for part in self.split_flow(text[1:-1])]
+        if text[0] == "{" and text[-1] == "}":
+            mapping = {}
+            for part in self.split_flow(text[1:-1]):
+                key, value = self.split_key(number, part)
+                mapping[key] = self.scalar(number, value) if value else None
+            return mapping
+        if text[0] == "{":
+            self.fail(number, "a {...} mapping must open and close on the same line")
+        low = text.lower()
+        if low in ("true", "yes", "on"):
+            return True
+        if low in ("false", "no", "off"):
+            return False
+        if low in ("null", "~"):
+            return None
+        if re.match(r"^[-+]?(0|[1-9][0-9]*)$", text):
+            return int(text)
+        if re.match(r"^[-+]?([0-9]+\.[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?$", text):
+            return float(text)
+        return text
+
+
+def parse_yaml(text, name):
+    try:
+        import yaml
+    except ImportError:
+        return MiniYaml(text, name).parse()
+    try:
+        return yaml.safe_load(text)
+    except yaml.YAMLError as error:
+        die("%s is not valid YAML: %s" % (name, error))
+
+
+# --- helpers ----------------------------------------------------------------------------
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def tree_files(root):
+    found = []
+    for base, dirs, files in os.walk(root):
+        dirs.sort()
+        for name in sorted(files):
+            found.append(os.path.relpath(os.path.join(base, name), root))
+    return found
+
+
+def write_sums(root):
+    with open(os.path.join(root, "SHA256SUMS"), "w") as out:
+        for rel in tree_files(root):
+            if rel != "SHA256SUMS":
+                out.write("%s  %s\n" % (sha256_file(os.path.join(root, rel)), rel))
+
+
+def read_sums(root):
+    path = os.path.join(root, "SHA256SUMS")
+    if not os.path.isfile(path):
+        die("%s has no SHA256SUMS" % root, 2)
+    sums = {}
+    with open(path) as handle:
+        for line in handle:
+            parts = line.rstrip("\n").split(None, 1)
+            if len(parts) == 2:
+                sums[os.path.normpath(parts[1].lstrip("*"))] = parts[0]
+    return sums
+
+
+def verify_dir(root, quiet=False):
+    sums = read_sums(root)
+    bad, missing = [], []
+    for rel, want in sorted(sums.items()):
+        path = os.path.join(root, rel)
+        if not os.path.isfile(path):
+            missing.append(rel)
+        elif sha256_file(path) != want:
+            bad.append(rel)
+    unlisted = sorted(set(tree_files(root)) - set(sums) - {"SHA256SUMS"})
+    for rel in bad:
+        row("FAIL", rel, "checksum differs")
+    for rel in missing:
+        row("FAIL", rel, "missing")
+    for rel in unlisted:
+        row("FAIL", rel, "not in SHA256SUMS")
+    if bad or missing or unlisted:
+        die("%s failed its check: nothing was used" % root, 2)
+    if not quiet:
+        log("All %d files in %s match SHA256SUMS" % (len(sums), root))
+    return sums
+
+
+def run(cmd, env=None, tee=True):
+    """Run a command, show its output indented, and return (exit code, output)."""
+    log("$ " + " ".join(shlex.quote(str(c)) for c in cmd))
+    proc = subprocess.Popen([str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            env=env, universal_newlines=True)
+    lines = []
+    for line in proc.stdout:
+        lines.append(line)
+        if tee:
+            sys.stdout.write("      " + line)
+            sys.stdout.flush()
+    return proc.wait(), "".join(lines)
+
+
+def run_interactive(cmd):
+    """Run a command attached to this terminal, so it can prompt."""
+    log("$ " + " ".join(shlex.quote(str(c)) for c in cmd))
+    return subprocess.call([str(c) for c in cmd])
+
+
+def request(url, method="GET", headers=None):
+    all_headers = {"User-Agent": USER_AGENT}
+    all_headers.update(headers or {})
+    return urllib.request.Request(url, headers=all_headers, method=method)
+
+
+def download(url, dest, quiet=False):
+    last = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request(url), timeout=120) as response, open(dest, "wb") as out:
+                total = int(response.headers.get("Content-Length") or 0)
+                done, shown = 0, 0
+                for chunk in iter(lambda: response.read(1024 * 1024), b""):
+                    out.write(chunk)
+                    done += len(chunk)
+                    if not quiet and total > 50 * 1024 * 1024 and done * 10 // total > shown:
+                        shown = done * 10 // total
+                        log("    %3d%%  %s of %s" % (shown * 10, human(done), human(total)))
+            return
+        except (OSError, http.client.HTTPException) as error:
+            last = error
+            if isinstance(error, urllib.error.HTTPError) and error.code in (401, 403, 404):
+                break
+            time.sleep(5)
+    die("download failed: %s (%s)" % (url, last))
+
+
+def probe(url):
+    """Ask for the first byte of a URL. Returns (ok, detail)."""
+    try:
+        with urllib.request.urlopen(request(url, headers={"Range": "bytes=0-0"}), timeout=30) as response:
+            response.read(1)
+            return True, "reachable"
+    except urllib.error.HTTPError as error:
+        return False, "HTTP %s" % error.code
+    except (OSError, http.client.HTTPException) as error:
+        return False, str(getattr(error, "reason", error))
+
+
+def parse_ref(ref):
+    rest, _, digest = ref.partition("@")
+    head, _, last = rest.rpartition("/")
+    tag = ""
+    if ":" in last:
+        last, tag = last.rsplit(":", 1)
+    path = head + "/" + last if head else last
+    host, _, repo_path = path.partition("/")
+    return {"host": host, "path": repo_path, "tag": tag, "digest": digest}
+
+
+def registry_probe(ref):
+    """Check that a bundle or image exists, with anonymous access if the registry wants a token."""
+    parts = parse_ref(ref)
+    scheme = "http" if parts["host"].split(":")[0] in ("localhost", "127.0.0.1") else "https"
+    url = "%s://%s/v2/%s/manifests/%s" % (scheme, parts["host"], parts["path"], parts["digest"] or parts["tag"] or "latest")
+    headers = {"Accept": MANIFEST_TYPES}
+    for attempt in (1, 2):
+        try:
+            with urllib.request.urlopen(request(url, method="HEAD", headers=headers), timeout=30):
+                return True, "found"
+        except urllib.error.HTTPError as error:
+            challenge = error.headers.get("WWW-Authenticate", "") if error.headers else ""
+            params = dict(re.findall(r'(\w+)="([^"]*)"', challenge))
+            if error.code == 401 and attempt == 1 and challenge.lower().startswith("bearer") and "realm" in params:
+                query = {"scope": "repository:%s:pull" % parts["path"]}
+                if "service" in params:
+                    query["service"] = params["service"]
+                try:
+                    with urllib.request.urlopen(request(params["realm"] + "?" + urllib.parse.urlencode(query)),
+                                                timeout=30) as response:
+                        token = json.loads(response.read().decode("utf-8"))
+                except (OSError, ValueError, http.client.HTTPException) as token_error:
+                    return False, "no anonymous access (%s)" % token_error
+                headers["Authorization"] = "Bearer " + (token.get("token") or token.get("access_token") or "")
+                continue
+            return False, "HTTP %s" % error.code
+        except (OSError, http.client.HTTPException) as error:
+            return False, str(getattr(error, "reason", error))
+    return False, "not authorized"
+
+
+def zstd_available():
+    for module in ("compression.zstd", "zstandard"):
+        try:
+            __import__(module)
+            return True
+        except ImportError:
+            pass
+    return bool(shutil.which("zstd") or shutil.which("unzstd"))
+
+
+def is_wsl():
+    try:
+        with open("/proc/sys/kernel/osrelease") as handle:
+            return "microsoft" in handle.read().lower()
+    except OSError:
+        return False
+
+
+def windows_home():
+    cmd = "/mnt/c/Windows/System32/cmd.exe"
+    if not os.path.exists(cmd):
+        return None
+    try:
+        out = subprocess.check_output([cmd, "/c", "echo %USERPROFILE%"], cwd="/mnt/c",
+                                      stderr=subprocess.DEVNULL, universal_newlines=True)
+        windows = out.strip().splitlines()[-1].strip() if out.strip() else ""
+        if not windows or "%" in windows:
+            return None
+        return subprocess.check_output(["wslpath", "-u", windows], universal_newlines=True).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def windows_path(linux_path):
+    try:
+        return subprocess.check_output(["wslpath", "-w", linux_path], universal_newlines=True).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return linux_path
+
+
+def copy_tree(src, dst):
+    """Plain file copy, which also works onto Windows drives mounted in WSL."""
+    for rel in tree_files(src):
+        target = os.path.join(dst, rel)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copyfile(os.path.join(src, rel), target)
+        if os.access(os.path.join(src, rel), os.X_OK):
+            try:
+                os.chmod(target, 0o755)
+            except OSError:
+                pass
+
+
+def set_aside(path):
+    """Keep an existing folder as <name>.previous-<stamp> rather than overwrite it. Only the
+    newest previous copy is kept: transfers and bundles run to gigabytes."""
+    if not os.path.exists(path):
+        return
+    for older in glob.glob(glob.escape(path) + ".previous-*"):
+        shutil.rmtree(older, ignore_errors=True)
+    aside = "%s.previous-%s" % (path, STAMP)
+    os.rename(path, aside)
+    log("Kept the previous %s as %s" % (os.path.basename(path), os.path.basename(aside)))
+
+
+def ensure_local_bin_on_path():
+    paths = os.environ.get("PATH", "").split(os.pathsep)
+    if LOCAL_BIN not in paths:
+        os.environ["PATH"] = os.pathsep.join([LOCAL_BIN] + paths)
+
+
+def imgpkg_extra_args():
+    return shlex.split(os.environ.get("KIT_IMGPKG_ARGS", ""))
+
+
+# --- configuration ------------------------------------------------------------------------
+
+def merge_defaults(value, defaults, where, warnings):
+    if not isinstance(defaults, dict):
+        return value
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        die("%s should be a set of keys, not %r" % (where or "kit.yml", value))
+    merged = {}
+    for key, default in defaults.items():
+        merged[key] = merge_defaults(value.get(key, default), default, (where + "." if where else "") + key, warnings)
+    for key in value:
+        if key not in defaults:
+            close = difflib.get_close_matches(key, list(defaults), n=1)
+            hint = " (did you mean %s?)" % close[0] if close else ""
+            warnings.append("unknown setting %s%s%s, ignored" % ((where + "." if where else ""), key, hint))
+    return merged
+
+
+def load_config(path):
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isfile(path):
+        die("no %s here; copy kit.yml from the repository and edit it" % path)
+    with open(path, encoding="utf-8") as handle:
+        raw = parse_yaml(handle.read(), os.path.basename(path))
+    warnings, problems = [], []
+    cfg = merge_defaults(raw or {}, DEFAULTS, "", warnings)
+    cfg["_path"] = path
+    cfg["_dir"] = os.path.dirname(path)
+
+    name = cfg["name"]
+    if not isinstance(name, str) or not re.match(r"^[A-Za-z0-9._-]+$", name or ""):
+        problems.append("name: give the transfer a name of letters, digits, dots, dashes, e.g. harbor-2.15.2")
+
+    harbor = cfg["harbor"]
+    if harbor["enabled"]:
+        version = harbor["version"]
+        if not isinstance(version, str):
+            problems.append("harbor.version: write it in quotes, e.g. \"2.15.2\"" if version is not None
+                            else "harbor.version: set the Harbor release, e.g. \"2.15.2\"")
+        elif not re.match(r"^v?[0-9]+\.[0-9]+\.[0-9]+$", version):
+            problems.append("harbor.version: %r is not a release like 2.15.2" % version)
+        else:
+            harbor["version"] = version.lstrip("v")
+        if harbor["compose_provider"] not in ("podman-compose", "docker-compose"):
+            problems.append("harbor.compose_provider: podman-compose or docker-compose, not %r" % harbor["compose_provider"])
+        if harbor["compose_provider"] == "docker-compose":
+            dcv = str(harbor["docker_compose_version"] or "")
+            if not re.match(r"^v?[0-9]+\.[0-9]+\.[0-9]+$", dcv):
+                problems.append("harbor.docker_compose_version: set a Docker Compose release, e.g. v5.5.1")
+            else:
+                harbor["docker_compose_version"] = "v" + dcv.lstrip("v")
+        if harbor["verify_signature"] is not True:
+            warnings.append("harbor.verify_signature is off: check the installer with cosign before it goes in")
+
+    for tool, version in cfg["tools"].items():
+        if tool not in TOOLS:
+            continue
+        if not (version == "latest" or re.match(r"^v[0-9]+\.[0-9]+\.[0-9]+$", str(version))):
+            problems.append("tools.%s: latest or a release tag such as v1.2.3, not %r" % (tool, version))
+
+    broadcom = cfg["broadcom"]
+    envs = broadcom["environments"]
+    if not (envs == "all" or (isinstance(envs, list) and all(isinstance(e, str) for e in envs))):
+        problems.append("broadcom.environments: all, or a list of inventories such as [prod, qa]")
+    bundles = broadcom["bundles"] or []
+    if not isinstance(bundles, list):
+        problems.append("broadcom.bundles: a list of '- ref: …' entries")
+        bundles = []
+    for i, entry in enumerate(bundles, 1):
+        if not isinstance(entry, dict) or not isinstance(entry.get("ref"), str):
+            problems.append("broadcom.bundles item %d: needs ref: <registry>/<path>:<tag>" % i)
+            continue
+        if "/" not in entry["ref"] or not (parse_ref(entry["ref"])["tag"] or parse_ref(entry["ref"])["digest"]):
+            problems.append("broadcom.bundles item %d: %r needs a registry, a path and a :tag" % (i, entry["ref"]))
+        if not entry.get("project"):
+            problems.append("broadcom.bundles item %d: needs project: <Harbor project>, e.g. tanzu-packages" % i)
+        unknown = set(entry) - {"ref", "project", "repo"}
+        if unknown:
+            warnings.append("broadcom.bundles item %d: unknown setting %s, ignored" % (i, ", ".join(sorted(unknown))))
+    broadcom["bundles"] = bundles
+
+    files = cfg["files"] or []
+    if not isinstance(files, list):
+        problems.append("files: a list of '- url: …' entries")
+        files = []
+    for i, entry in enumerate(files, 1):
+        if not isinstance(entry, dict) or not re.match(r"^https?://", str(entry.get("url", ""))):
+            problems.append("files item %d: needs url: https://…" % i)
+        elif entry.get("sha256") and not re.match(r"^[0-9a-fA-F]{64}$", str(entry["sha256"])):
+            problems.append("files item %d: sha256 should be 64 hex characters" % i)
+    cfg["files"] = files
+
+    for warning in warnings:
+        log("WARNING: " + warning)
+    if problems:
+        for problem in problems:
+            row("FAIL", problem)
+        die("%s needs fixing first" % path)
+    return cfg
+
+
+def config_path(cfg, value):
+    value = os.path.expanduser(os.path.expandvars(str(value)))
+    return value if os.path.isabs(value) else os.path.normpath(os.path.join(cfg["_dir"], value))
+
+
+def repo_path(value):
+    """A path that lives in this repository (the catalog, the service YAMLs)."""
+    value = os.path.expanduser(os.path.expandvars(str(value)))
+    return value if os.path.isabs(value) else os.path.normpath(os.path.join(REPO, value))
+
+
+# --- the Broadcom catalog ----------------------------------------------------------------
+
+CATALOG_KINDS = ("supervisor-service", "addon-repository", "images")
+
+
+def load_catalog(path):
+    """broadcom/catalog.yml as {item: {name, kind, project, default, versions: {version: [refs]}}}."""
+    if not os.path.isfile(path):
+        return {}
+    name = os.path.relpath(path, REPO)
+    with open(path, encoding="utf-8") as handle:
+        raw = parse_yaml(handle.read(), name) or {}
+    if not isinstance(raw, dict):
+        die("%s should be a set of items" % name)
+    catalog, problems = {}, []
+    for key, item in raw.items():
+        where = "%s, %s" % (name, key)
+        if not isinstance(item, dict):
+            problems.append("%s: should be a set of keys" % where)
+            continue
+        if item.get("kind") not in CATALOG_KINDS:
+            problems.append("%s: kind is %r; it should be one of %s" % (where, item.get("kind"), ", ".join(CATALOG_KINDS)))
+        if not item.get("project"):
+            problems.append("%s: needs project: <Harbor project>" % where)
+        versions = {}
+        for version, refs in (item.get("versions") or {}).items():
+            refs = refs if isinstance(refs, list) else [refs]
+            good = [r for r in refs if isinstance(r, str) and "/" in r
+                    and (parse_ref(r)["tag"] or parse_ref(r)["digest"])]
+            if not refs or len(good) != len(refs):
+                problems.append("%s: version %s needs one or more <registry>/<path>:<tag>" % (where, version))
+                continue
+            versions[str(version)] = refs
+        if not versions:
+            problems.append("%s: has no versions" % where)
+        default = str(item.get("default", ""))
+        if versions and default not in versions:
+            problems.append("%s: default %r is not one of its versions" % (where, default))
+        catalog[str(key)] = dict(item, versions=versions, default=default)
+    if problems:
+        for problem in problems:
+            row("FAIL", problem)
+        die("%s needs fixing first" % name)
+    return catalog
+
+
+def harbor_repo(item, ref):
+    """Where a catalog reference lands in its Harbor project: the last part of its path,
+    or the path after repo_path_after when the item sets one."""
+    path = parse_ref(ref)["path"]
+    prefix = item.get("repo_path_after") or ""
+    if prefix and path.startswith(prefix):
+        return path[len(prefix):]
+    return path.rsplit("/", 1)[-1]
+
+
+def inventory_names():
+    root = os.path.join(REPO, "inventories")
+    if not os.path.isdir(root):
+        return []
+    return sorted(d for d in os.listdir(root) if os.path.isfile(os.path.join(root, d, "hosts")))
+
+
+def broadcom_envs(cfg):
+    """The environments this transfer carries Broadcom items for (broadcom.environments)."""
+    value = cfg["broadcom"]["environments"]
+    known = inventory_names()
+    if value == "all":
+        return [name for name in known if not name.startswith("_")]
+    missing = [name for name in value if name not in known]
+    if missing:
+        die("broadcom.environments in %s: there is no inventory %s (there are: %s)"
+            % (cfg["_path"], ", ".join(missing), ", ".join(known)))
+    return list(value)
+
+
+def wanted_items(inv, catalog):
+    """What an environment turns on in broadcom_items: ({item: [versions]}, problems)."""
+    raw = inv.vars.get("broadcom_items")
+    if raw is None or raw == {}:
+        return {}, []
+    where = inv.where("broadcom_items")
+    if not isinstance(raw, dict):
+        return {}, ["%s: broadcom_items should list item: true, false, a version, or a list of versions" % where]
+    choices, problems = {}, []
+    for key, value in raw.items():
+        item = catalog.get(str(key))
+        if item is None:
+            close = difflib.get_close_matches(str(key), list(catalog), n=1)
+            problems.append("%s: %s is not in broadcom/catalog.yml%s"
+                            % (where, key, " (did you mean %s?)" % close[0] if close else ""))
+            continue
+        if value is True:
+            versions = [item["default"]]
+        elif value is False or value is None:
+            continue
+        elif isinstance(value, list):
+            versions = [str(v) for v in value]
+        elif isinstance(value, (str, int, float)):
+            versions = [str(value)]
+        else:
+            problems.append("%s: %s: true, false, a version, or a list of versions" % (where, key))
+            continue
+        unknown = [v for v in versions if v not in item["versions"]]
+        if unknown:
+            problems.append("%s: %s %s is not in broadcom/catalog.yml (it has %s)"
+                            % (where, key, ", ".join(unknown), ", ".join(item["versions"])))
+            continue
+        if versions:
+            choices[str(key)] = versions
+    return choices, problems
+
+
+def collect_bundles(cfg):
+    """Every bundle to fetch: the catalog items the environments turn on, the bundles the
+    Supervisor Service YAMLs name, and the ones listed in kit.yml."""
+    broadcom = cfg["broadcom"]
+    registry = broadcom["registry"]
+    pattern = re.compile(re.escape(registry) + r"/[A-Za-z0-9._/-]+(?::[A-Za-z0-9._-]+)?(?:@sha256:[0-9a-f]{64})?")
+    found = {}
+    services_dir = repo_path(broadcom["services_dir"])
+    services = []
+    if os.path.isdir(services_dir):
+        services = sorted(f for f in os.listdir(services_dir) if f.endswith((".yml", ".yaml")))
+    for name in services:
+        with open(os.path.join(services_dir, name), encoding="utf-8") as handle:
+            for ref in pattern.findall(handle.read()):
+                parts = parse_ref(ref)
+                entry = found.setdefault(ref, {"ref": ref, "project": broadcom["services_project"],
+                                               "repo": parts["path"].rsplit("/", 1)[-1], "services": []})
+                if name not in entry["services"]:
+                    entry["services"].append(name)
+    for item in broadcom["bundles"]:
+        parts = parse_ref(item["ref"])
+        entry = found.setdefault(item["ref"], {"ref": item["ref"], "services": []})
+        entry["project"] = item["project"]
+        entry["repo"] = item.get("repo") or parts["path"].rsplit("/", 1)[-1]
+
+    catalog = load_catalog(repo_path(broadcom["catalog"]))
+    envs = broadcom_envs(cfg)
+    wanted, problems = {}, []
+    for env in envs:
+        choices, env_problems = wanted_items(Inventory(env), catalog)
+        problems += env_problems
+        for key, versions in choices.items():
+            for version in versions:
+                wanted.setdefault((key, version), set()).add(env)
+    if problems:
+        for problem in problems:
+            row("FAIL", problem)
+        die("fix broadcom_items in the inventories above first")
+    order = list(catalog)
+    for (key, version), env_set in sorted(wanted.items(), key=lambda kv: (
+            order.index(kv[0][0]), list(catalog[kv[0][0]]["versions"]).index(kv[0][1]))):
+        item = catalog[key]
+        for ref in item["versions"][version]:
+            entry = found.setdefault(ref, {"ref": ref, "services": []})
+            entry.update({"item": key, "version": version, "item_kind": item["kind"],
+                          "project": item["project"], "repo": harbor_repo(item, ref)})
+            entry["envs"] = sorted(set(entry.get("envs") or []) | env_set)
+    cfg["_envs"] = envs
+
+    used = set()
+    bundles = []
+    for entry in found.values():
+        parts = parse_ref(entry["ref"])
+        entry["tag"], entry["digest"] = parts["tag"], parts["digest"]
+        label = parts["tag"] or parts["digest"].split(":")[-1][:12]
+        base = re.sub(r"[^A-Za-z0-9._-]", "_", "%s-%s" % (entry["repo"], label))
+        tar, n = base + ".tar", 2
+        while tar in used:
+            tar, n = "%s-%d.tar" % (base, n), n + 1
+        used.add(tar)
+        entry["tar"] = "tars/" + tar
+        bundles.append(entry)
+
+    # Two sources that would land on the same Harbor repository and tag would overwrite each other.
+    targets = {}
+    for b in bundles:
+        target = "%s/%s:%s" % (b["project"], b["repo"], b["tag"] or b["digest"])
+        if targets.get(target, b["ref"]) != b["ref"]:
+            die("%s and %s would both be %s in Harbor" % (targets[target], b["ref"], target))
+        targets[target] = b["ref"]
+    return bundles, services_dir, services
+
+
+# --- check and fetch (connected side) ---------------------------------------------------
+
+def plan_row(label, detail):
+    row("", label, detail, width=10)
+
+
+def plan_summary(cfg, bundles, services):
+    harbor, out = cfg["harbor"], cfg["output"]
+    target = os.path.join(config_path(cfg, out["dir"]), cfg["name"])
+    step("Plan from %s" % cfg["_path"])
+    plan_row("transfer", target)
+    if out["windows_copy"]:
+        plan_row("", "and a copy in C:\\Users\\<you>\\kit-transfer\\%s" % cfg["name"] if is_wsl() else "(not WSL: no Windows copy)")
+    if harbor["enabled"]:
+        provider = harbor["compose_provider"]
+        if provider == "docker-compose":
+            provider += " " + harbor["docker_compose_version"]
+        plan_row("harbor", "%s, signature %s, compose %s" % (
+            harbor["version"], "checked" if harbor["verify_signature"] else "NOT checked", provider))
+    plan_row("docker_ce", "Docker Engine RPMs from %s" % cfg["docker_ce"]["repo"] if cfg["docker_ce"]["enabled"] else "no")
+    envs = cfg.get("_envs") or []
+    plan_row("broadcom", "%d bundle(s): %d for the items turned on in %s, %d from %d service YAML(s), %d listed in kit.yml" % (
+        len(bundles), sum(1 for b in bundles if b.get("item")), ", ".join(envs) or "no environment",
+        sum(1 for b in bundles if b["services"] and not b.get("item")), len(services), len(cfg["broadcom"]["bundles"])))
+    for b in bundles:
+        if b.get("item"):
+            plan_row("  %s %s" % (b["item"], b["version"]),
+                     "-> %s/%s:%s  (for %s)" % (b["project"], b["repo"], b["tag"] or b["digest"], ", ".join(b["envs"])))
+        else:
+            plan_row("  " + b["ref"], "-> %s/%s  (for every environment)" % (b["project"], b["repo"]))
+    plan_row("files", "%d" % len(cfg["files"]))
+
+
+def preflight(cfg, bundles):
+    """Every check that needs no large download. Returns the number of problems."""
+    problems = 0
+    harbor = cfg["harbor"]
+
+    step("Workstation")
+    ok = sys.version_info >= (3, 6)
+    row("OK" if ok else "FAIL", "python3 %s" % platform.python_version(), "" if ok else "3.6 or later is needed")
+    problems += 0 if ok else 1
+    for tool in ("bash", "curl", "sha256sum"):
+        found = shutil.which(tool)
+        row("OK" if found else "FAIL", tool, found or "install it first")
+        problems += 0 if found else 1
+    needed = []
+    if harbor["enabled"] and harbor["verify_signature"]:
+        needed.append("cosign")
+    if bundles:
+        needed.append("imgpkg")
+    for tool in needed:
+        found = shutil.which(tool)
+        if found:
+            row("OK", tool, found)
+        else:
+            spec = TOOLS[tool]
+            ok, detail = probe("https://github.com/%s/releases/latest/download/%s" % (spec["repo"], spec["sums"]))
+            row("--" if ok else "FAIL", tool, "not installed; fetch installs it into %s" % LOCAL_BIN if ok
+                else "not installed, and github.com is not reachable (%s)" % detail)
+            problems += 0 if ok else 1
+    if cfg["docker_ce"]["enabled"]:
+        ok = zstd_available()
+        row("OK" if ok else "FAIL", "zstd", "for Docker's repository metadata" if ok
+            else "install zstd first: sudo dnf install zstd, or sudo apt-get install zstd")
+        problems += 0 if ok else 1
+    out_dir = config_path(cfg, cfg["output"]["dir"])
+    probe_dir = out_dir
+    while not os.path.exists(probe_dir):
+        probe_dir = os.path.dirname(probe_dir)
+    free = shutil.disk_usage(probe_dir).free
+    row("OK" if free > 5 * 1024 ** 3 else "WARN", "free space for %s" % out_dir, human(free))
+
+    step("Sources")
+    if harbor["enabled"]:
+        version = harbor["version"]
+        base = "https://github.com/goharbor/harbor/releases/download/v%s/harbor-offline-installer-v%s.tgz" % (version, version)
+        for label, url in (("Harbor %s installer" % version, base),
+                           ("Harbor %s signature" % version, base + ".sigstore.json")):
+            ok, detail = probe(url)
+            row("OK" if ok else "FAIL", label, detail)
+            problems += 0 if ok else 1
+        if harbor["compose_provider"] == "docker-compose":
+            url = "https://github.com/docker/compose/releases/download/%s/docker-compose-linux-x86_64.sha256" % harbor["docker_compose_version"]
+            ok, detail = probe(url)
+            row("OK" if ok else "FAIL", "docker-compose %s" % harbor["docker_compose_version"], detail)
+            problems += 0 if ok else 1
+        else:
+            ok, detail = probe(harbor["epel_mirror"].rstrip("/") + "/repodata/repomd.xml")
+            row("OK" if ok else "FAIL", "EPEL 9 (podman-compose)", detail)
+            problems += 0 if ok else 1
+    if cfg["docker_ce"]["enabled"]:
+        ok, detail = probe(cfg["docker_ce"]["repo"].rstrip("/") + "/repodata/repomd.xml")
+        row("OK" if ok else "FAIL", "Docker CE repository", detail)
+        problems += 0 if ok else 1
+    for b in bundles:
+        ok, detail = registry_probe(b["ref"])
+        row("OK" if ok else "FAIL", b["ref"], detail)
+        problems += 0 if ok else 1
+    for f in cfg["files"]:
+        ok, detail = probe(f["url"])
+        row("OK" if ok else "FAIL", f["url"], detail)
+        problems += 0 if ok else 1
+    return problems
+
+
+def ensure_tool(name, version):
+    found = shutil.which(name)
+    if found:
+        log("%s: using %s" % (name, found))
+        return found
+    spec = TOOLS[name]
+    where = "latest/download" if version == "latest" else "download/" + version
+    base = "https://github.com/%s/releases/%s" % (spec["repo"], where)
+    tmp = tempfile.mkdtemp(prefix="kit-%s-" % name)
+    try:
+        asset, sums = os.path.join(tmp, spec["asset"]), os.path.join(tmp, spec["sums"])
+        download(base + "/" + spec["asset"], asset, quiet=True)
+        download(base + "/" + spec["sums"], sums, quiet=True)
+        want = None
+        with open(sums) as handle:
+            for line in handle:
+                parts = line.split()
+                if len(parts) >= 2 and parts[-1].lstrip("*./") == spec["asset"]:
+                    want = parts[0]
+        if not want:
+            die("%s has no checksum for %s" % (spec["sums"], spec["asset"]), 2)
+        if sha256_file(asset) != want:
+            die("the %s download does not match its release checksum" % name, 2)
+        os.makedirs(LOCAL_BIN, exist_ok=True)
+        dest = os.path.join(LOCAL_BIN, name)
+        shutil.copyfile(asset, dest)
+        os.chmod(dest, 0o755)
+        log("%s: installed %s into %s (checksum OK)" % (name, version, dest))
+        return dest
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def repo_tarball(dest, exclude_paths):
+    skip_dirs = {".git", "artifacts", "__pycache__", ".ansible", "collections", "deployments", "dist", ".venv"}
+    exclude_paths = [os.path.realpath(p) for p in exclude_paths]
+
+    def keep(info):
+        parts = info.name.split("/")[1:]
+        base = parts[-1] if parts else ""
+        if any(p in skip_dirs for p in parts):
+            return None
+        # secrets never travel: each environment keeps its own vault
+        if base in (".vault_pass", "vault.yml") or base.endswith((".decrypted", ".pyc")):
+            return None
+        if base.startswith(".fetch-harbor-") or ".partial-" in base or ".previous-" in base:
+            return None
+        real = os.path.realpath(os.path.join(REPO, *parts)) if parts else REPO
+        if any(real == p or real.startswith(p + os.sep) for p in exclude_paths):
+            return None
+        return info
+
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    with tarfile.open(dest, "w:gz") as archive:
+        archive.add(REPO, arcname=REPO_NAME, filter=keep)
+
+
+def describe_transfer(cfg, root, bundles, started):
+    files = [rel for rel in tree_files(root)]
+    total = sum(os.path.getsize(os.path.join(root, rel)) for rel in files)
+    harbor = cfg["harbor"]
+    lines = [
+        "Transfer   %s" % cfg["name"],
+        "Built      %s, by %s on %s (python %s)" % (
+            started.strftime("%Y-%m-%d %H:%M %Z").strip() or started.strftime("%Y-%m-%d %H:%M"),
+            getpass.getuser(), socket.gethostname(), platform.python_version()),
+        "From       kit.yml, copied into this folder",
+        "",
+        "Contents",
+    ]
+    if harbor["enabled"]:
+        provider = harbor["compose_provider"]
+        if provider == "docker-compose":
+            provider += " " + harbor["docker_compose_version"]
+        lines.append("  harbor/                 Harbor %s, signature %s; compose provider %s" % (
+            harbor["version"], "checked with cosign" if harbor["verify_signature"] else "NOT checked", provider))
+        if cfg["docker_ce"]["enabled"]:
+            rpms = sorted(os.listdir(os.path.join(root, "harbor", "docker"))) if os.path.isdir(os.path.join(root, "harbor", "docker")) else []
+            lines.append("  harbor/docker/          Docker Engine: %s" % ", ".join(r for r in rpms if r.endswith(".rpm")))
+    if bundles:
+        lines.append("  broadcom/               %d bundle(s), pushed into Harbor by 'kit load':" % len(bundles))
+        for b in bundles:
+            size = os.path.getsize(os.path.join(root, "broadcom", b["tar"]))
+            who = "%s %s, for %s" % (b["item"], b["version"], ", ".join(b["envs"])) if b.get("item") else "for every environment"
+            lines.append("                            %-48s -> %s/%s  (%s; %s)" % (b["tar"], b["project"], b["repo"], human(size), who))
+    for f in cfg["files"]:
+        lines.append("  files/%-17s %s" % (f.get("name") or os.path.basename(urllib.parse.urlparse(f["url"]).path), f["url"]))
+    if os.path.exists(os.path.join(root, "tools", "imgpkg")):
+        lines.append("  tools/imgpkg            for the load step inside")
+    lines += [
+        "  repo/                   this repository as it was when the transfer was built (no vaults)",
+        "  SHA256SUMS              every file in this folder",
+        "",
+        "Total      %s in %d files" % (human(total), len(files) + 2),
+        "",
+        "Inside the environment, on the Ansible control host:",
+        "  tar -xzf <this folder>/repo/%s.tar.gz -C ~" % REPO_NAME,
+        "    (to update a copy that is already there and keep its inventories, add",
+        "     --exclude=%s/inventories)" % REPO_NAME,
+        "  cd ~/%s" % REPO_NAME,
+        "  python3 kit publish --from <this folder> --env <environment>",
+        "  make build-registry ENV=<environment>",
+        "  python3 kit load --env <environment>",
+    ]
+    with open(os.path.join(root, "TRANSFER.txt"), "w") as out:
+        out.write("\n".join(lines) + "\n")
+
+
+def cmd_check(args):
+    cfg = load_config(args.config)
+    bundles, _, services = collect_bundles(cfg)
+    plan_summary(cfg, bundles, services)
+    problems = preflight(cfg, bundles)
+    print("")
+    if problems:
+        die("%d problem(s) above; fix them and run python3 kit check again" % problems, 2)
+    log("Everything answers. Next: python3 kit fetch")
+
+
+def cmd_fetch(args):
+    started = datetime.datetime.now().astimezone()
+    cfg = load_config(args.config)
+    ensure_local_bin_on_path()
+    bundles, services_dir, services = collect_bundles(cfg)
+    plan_summary(cfg, bundles, services)
+    problems = preflight(cfg, bundles)
+    if problems:
+        die("%d problem(s) above: nothing was downloaded. Fix them, then run python3 kit fetch again" % problems, 2)
+
+    harbor = cfg["harbor"]
+    out_dir = config_path(cfg, cfg["output"]["dir"])
+    final = os.path.join(out_dir, cfg["name"])
+    partial = os.path.join(out_dir, ".%s.partial-%s" % (cfg["name"], STAMP))
+    os.makedirs(partial)
+    try:
+        step("Tools")
+        if harbor["enabled"] and harbor["verify_signature"]:
+            ensure_tool("cosign", cfg["tools"]["cosign"])
+        imgpkg = ensure_tool("imgpkg", cfg["tools"]["imgpkg"]) if bundles else None
+
+        if harbor["enabled"]:
+            step("Harbor files")
+            cmd = ["bash", os.path.join(REPO, "scripts", "fetch_harbor.sh"),
+                   "--version", harbor["version"], "--out", os.path.join(partial, "harbor"),
+                   "--compose-provider", harbor["compose_provider"], "--epel-mirror", harbor["epel_mirror"]]
+            if harbor["compose_provider"] == "docker-compose":
+                cmd += ["--docker-compose-version", harbor["docker_compose_version"]]
+            if not harbor["verify_signature"]:
+                cmd.append("--no-verify-signature")
+            if cfg["docker_ce"]["enabled"]:
+                cmd += ["--with-docker-ce", "--docker-ce-repo", cfg["docker_ce"]["repo"]]
+            os.environ["KIT_RUNNING"] = "1"
+            code = run_interactive(cmd)
+            if code:
+                die("getting the Harbor files failed (see above), so nothing was written", 2 if code == 2 else 1)
+
+        if bundles:
+            step("Broadcom bundles")
+            bdir = os.path.join(partial, "broadcom")
+            os.makedirs(os.path.join(bdir, "tars"))
+            for b in bundles:
+                tar = os.path.join(bdir, b["tar"])
+                if b.get("item_kind") == "images":
+                    code, output = run([imgpkg, "copy", "-i", b["ref"], "--to-tar", tar] + imgpkg_extra_args())
+                    b["kind"] = "image"
+                else:
+                    code, output = run([imgpkg, "copy", "-b", b["ref"], "--to-tar", tar] + imgpkg_extra_args())
+                    b["kind"] = "bundle"
+                if code and b["kind"] == "bundle" and ("plain image" in output or "Expected bundle" in output):
+                    if os.path.exists(tar):
+                        os.remove(tar)
+                    code, output = run([imgpkg, "copy", "-i", b["ref"], "--to-tar", tar] + imgpkg_extra_args())
+                    b["kind"] = "image"
+                if code:
+                    die("imgpkg could not download %s: nothing was written" % b["ref"], 2)
+                log("%s: %s" % (b["tar"], human(os.path.getsize(tar))))
+            if services:
+                os.makedirs(os.path.join(bdir, "services"))
+                for name in services:
+                    shutil.copyfile(os.path.join(services_dir, name), os.path.join(bdir, "services", name))
+            with open(os.path.join(bdir, "bundles.json"), "w") as out:
+                json.dump(bundles, out, indent=2)
+            os.makedirs(os.path.join(partial, "tools"))
+            shutil.copyfile(imgpkg, os.path.join(partial, "tools", "imgpkg"))
+            os.chmod(os.path.join(partial, "tools", "imgpkg"), 0o755)
+
+        if cfg["files"]:
+            step("Files")
+            os.makedirs(os.path.join(partial, "files"))
+            for f in cfg["files"]:
+                name = f.get("name") or os.path.basename(urllib.parse.urlparse(f["url"]).path) or "download"
+                dest = os.path.join(partial, "files", name)
+                log("Downloading %s" % f["url"])
+                download(f["url"], dest)
+                digest = sha256_file(dest)
+                if f.get("sha256") and digest != str(f["sha256"]).lower():
+                    die("%s does not match the sha256 in kit.yml: nothing was written" % name, 2)
+                log("%s: %s, sha256 %s%s" % (name, human(os.path.getsize(dest)), digest,
+                                             " (matches kit.yml)" if f.get("sha256") else ""))
+
+        step("Repository, description and checksums")
+        repo_tarball(os.path.join(partial, "repo", REPO_NAME + ".tar.gz"), [out_dir, partial])
+        shutil.copyfile(cfg["_path"], os.path.join(partial, "kit.yml"))
+        describe_transfer(cfg, partial, bundles, started)
+        write_sums(partial)
+    except BaseException:
+        shutil.rmtree(partial, ignore_errors=True)
+        raise
+
+    set_aside(final)
+    os.rename(partial, final)
+    sums = verify_dir(final, quiet=True)
+    log("Transfer written to %s (%d files)" % (final, len(sums)))
+
+    copy = None
+    if cfg["output"]["windows_copy"] and is_wsl():
+        home = windows_home()
+        if not home:
+            log("WARNING: could not find your Windows home folder; copy %s across yourself" % final)
+        else:
+            step("Copy for Windows")
+            copy = os.path.join(home, "kit-transfer", cfg["name"])
+            set_aside(copy)
+            copy_tree(final, copy)
+            verify_dir(copy, quiet=True)
+            log("Copied and checked: %s" % windows_path(copy))
+
+    step("Done")
+    with open(os.path.join(final, "TRANSFER.txt")) as handle:
+        for line in handle.read().splitlines():
+            print("    " + line)
+    print("")
+    log("Carry %s through the approved transfer process." % (windows_path(copy) if copy else final))
+
+
+# --- verify, publish and load (inside) ---------------------------------------------------
+
+class Inventory(object):
+    """The literal values the kit needs from inventories/<env>, read without Ansible or the vault."""
+
+    def __init__(self, env):
+        self.env = env
+        self.dir = os.path.join(REPO, "inventories", env)
+        hosts_file = os.path.join(self.dir, "hosts")
+        if not os.path.isfile(hosts_file):
+            root = os.path.join(REPO, "inventories")
+            known = sorted(d for d in os.listdir(root) if os.path.isfile(os.path.join(root, d, "hosts")))
+            die("there is no inventory %r; choose one of: %s" % (env, ", ".join(known)))
+        self.hosts = self.group_hosts(hosts_file, "registry")
+        files = sorted(glob.glob(os.path.join(self.dir, "group_vars", "all", "*.yml")))
+        files += sorted(glob.glob(os.path.join(self.dir, "group_vars", "registry", "*.yml")))
+        if self.hosts:
+            files.append(os.path.join(self.dir, "host_vars", self.hosts[0] + ".yml"))
+        self.files = [path for path in files if os.path.isfile(path)]
+        self.vars = {}
+        for path in files:
+            if not os.path.isfile(path) or os.path.basename(path) == "vault.yml":
+                continue
+            with open(path, encoding="utf-8") as handle:
+                text = handle.read()
+            if text.lstrip().startswith("$ANSIBLE_VAULT"):
+                continue
+            try:
+                data = parse_yaml(text, os.path.relpath(path, REPO))
+            except KitError:
+                continue
+            if isinstance(data, dict):
+                self.vars.update(data)
+
+    @staticmethod
+    def group_hosts(path, group):
+        hosts, current = [], None
+        with open(path) as handle:
+            for line in handle:
+                line = re.split(r"[#;]", line, maxsplit=1)[0].strip()
+                if not line:
+                    continue
+                if line.startswith("[") and line.endswith("]"):
+                    current = line[1:-1]
+                elif current == group:
+                    hosts.append(line.split()[0])
+        return hosts
+
+    def render(self, value, depth=0):
+        if not isinstance(value, str) or "{{" not in value or depth > 5:
+            return value
+
+        def substitute(match):
+            name = match.group(1).strip()
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name) and name in self.vars:
+                return str(self.render(self.vars[name], depth + 1))
+            return match.group(0)
+        return re.sub(r"\{\{(.*?)\}\}", substitute, value)
+
+    def literal(self, name, default=None):
+        value = self.render(self.vars.get(name, default))
+        if value is None or "{{" in str(value):
+            return default
+        return str(value)
+
+    def where(self, name):
+        for path in reversed(self.files):
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                if re.search(r"^%s:" % re.escape(name), handle.read(), re.M):
+                    return os.path.relpath(path, REPO)
+        if name == "broadcom_items":
+            return "inventories/%s/group_vars/registry/broadcom.yml" % self.env
+        for rel in ("group_vars/all/artifacts.yml", "group_vars/all/main.yml", "group_vars/registry/main.yml"):
+            path = os.path.join(self.dir, rel)
+            if os.path.isfile(path):
+                with open(path) as handle:
+                    if re.search(r"^%s:" % re.escape(name), handle.read(), re.M):
+                        return "inventories/%s/%s" % (self.env, rel)
+        if self.hosts:
+            return "inventories/%s/host_vars/%s.yml" % (self.env, self.hosts[0])
+        return "inventories/%s" % self.env
+
+
+def ensure_staging(path):
+    if os.path.isdir(path) and os.access(path, os.W_OK):
+        return
+    if os.geteuid() == 0:
+        os.makedirs(path, exist_ok=True)
+        return
+    user = getpass.getuser()
+    log("%s is missing or not writable by %s; creating it with sudo" % (path, user))
+    for cmd in (["sudo", "mkdir", "-p", path], ["sudo", "chown", "%s:" % user, path]):
+        if run_interactive(cmd):
+            die("could not prepare %s. Run: sudo mkdir -p %s && sudo chown %s: %s" % (path, path, user, path))
+
+
+def kit_mismatches(harbor_dir, inv):
+    """What the inventory expects to find in these Harbor files that isn't there."""
+    runtime = inv.literal("harbor_container_runtime", "podman")
+    provider = inv.literal("harbor_podman_compose_provider", "podman-compose")
+    has_binary = os.path.isfile(os.path.join(harbor_dir, "docker-compose-linux-x86_64"))
+    has_rpms = {sub: bool(glob.glob(os.path.join(harbor_dir, sub, "*.rpm"))) for sub in ("podman", "docker")}
+    found = []
+    if runtime == "podman" and provider == "docker-compose" and not has_binary:
+        found.append("the inventory runs Harbor with docker-compose, but this transfer has no docker-compose binary. "
+                     "Set harbor.compose_provider: docker-compose in kit.yml and fetch again, or set "
+                     "harbor_podman_compose_provider: podman-compose in %s" % inv.where("harbor_podman_compose_provider"))
+    elif runtime == "podman" and provider == "podman-compose" and not has_rpms["podman"]:
+        found.append("the inventory runs Harbor with podman-compose, but this transfer has no podman-compose RPMs. "
+                     "Set harbor.compose_provider: podman-compose in kit.yml and fetch again, or set "
+                     "harbor_podman_compose_provider: docker-compose in %s" % inv.where("harbor_podman_compose_provider"))
+    if runtime == "docker" and inv.literal("docker_offline_source", "yum") == "staged" and not has_rpms["docker"]:
+        found.append("the inventory installs Docker CE from the transfer (docker_offline_source: staged), but this transfer "
+                     "has no Docker RPMs. Set docker_ce.enabled: true in kit.yml and fetch again, or set "
+                     "docker_offline_source: yum in %s if the server's repositories carry Docker CE"
+                     % inv.where("docker_offline_source"))
+    return found
+
+
+def cmd_verify(args):
+    root = os.path.abspath(os.path.expanduser(args.from_dir))
+    step("Checking %s" % root)
+    verify_dir(root)
+
+
+def cmd_publish(args):
+    root = os.path.abspath(os.path.expanduser(args.from_dir))
+    step("Checking the transfer")
+    sums = verify_dir(root)
+    inv = Inventory(args.env)
+    staging = os.path.abspath(args.staging or inv.literal("artifact_staging") or "/var/staging/artifacts")
+    ensure_staging(staging)
+
+    if os.path.isdir(os.path.join(root, "harbor")):
+        for problem in kit_mismatches(os.path.join(root, "harbor"), inv):
+            log("WARNING: " + problem)
+        step("Staging the Harbor files in %s" % staging)
+        os.environ["KIT_RUNNING"] = "1"
+        code = run_interactive(["bash", os.path.join(REPO, "scripts", "pull_harbor.sh"),
+                                "--from", os.path.join(root, "harbor"), "--to", staging, "--inventory", inv.dir])
+        if code:
+            die("staging the Harbor files failed (see above)", code)
+        nexus_on = inv.vars.get("nexus_enabled")
+        source = ("repo" if nexus_on else "staged") if isinstance(nexus_on, bool) else inv.literal("artifact_source", "staged")
+        if source != "repo":
+            log("Nexus is off for %s: the build reads the Harbor files from %s" % (args.env, staging))
+        elif args.skip_nexus:
+            log("--skip-nexus: not publishing to Nexus")
+        else:
+            nexus = (args.nexus or inv.literal("nexus_url") or "").rstrip("/")
+            if not nexus or "CHANGE_ME" in nexus:
+                die("set nexus_url in %s, or pass --nexus https://<nexus>" % inv.where("nexus_url"))
+            step("Uploading the Harbor files to %s" % nexus)
+            cmd = ["bash", os.path.join(REPO, "scripts", "publish_harbor.sh"), "--nexus", nexus,
+                   "--dir", os.path.join(staging, "harbor"),
+                   "--raw-repo", inv.literal("nexus_raw_repo", "vmware-raw"),
+                   "--yum-repo", inv.literal("nexus_yum_repo", "harbor-epel")]
+            if args.cacert:
+                cmd += ["--cacert", args.cacert]
+            code = run_interactive(cmd)
+            if code:
+                die("publishing to Nexus failed (see above)", code)
+
+    if os.path.isdir(os.path.join(root, "broadcom")):
+        dest = os.path.join(staging, "broadcom")
+        step("Staging the Broadcom bundles in %s" % dest)
+        set_aside(dest)
+        copy_tree(os.path.join(root, "broadcom"), dest)
+        if os.path.isfile(os.path.join(root, "tools", "imgpkg")):
+            os.makedirs(os.path.join(dest, "tools"), exist_ok=True)
+            shutil.copyfile(os.path.join(root, "tools", "imgpkg"), os.path.join(dest, "tools", "imgpkg"))
+            os.chmod(os.path.join(dest, "tools", "imgpkg"), 0o755)
+        checked = 0
+        for rel, want in sums.items():
+            top = rel.split(os.sep, 1)
+            if top[0] in ("broadcom", "tools") and len(top) == 2:
+                target = os.path.join(dest, top[1]) if top[0] == "broadcom" else os.path.join(dest, "tools", top[1])
+                if sha256_file(target) != want:
+                    die("%s changed while it was copied" % target, 2)
+                checked += 1
+        log("%d files staged and checked" % checked)
+
+    step("Next")
+    print("    make build-registry ENV=%s" % args.env)
+    if os.path.isdir(os.path.join(root, "broadcom")):
+        print("    python3 kit load --env %s" % args.env)
+
+
+def cmd_load(args):
+    inv = Inventory(args.env)
+    staging = os.path.abspath(args.staging or inv.literal("artifact_staging") or "/var/staging/artifacts")
+    bdir = os.path.abspath(os.path.expanduser(args.from_dir)) if args.from_dir else os.path.join(staging, "broadcom")
+    manifest = os.path.join(bdir, "bundles.json")
+    if not os.path.isfile(manifest):
+        die("no Broadcom bundles at %s: run python3 kit publish first" % bdir)
+    with open(manifest) as handle:
+        bundles = json.load(handle)
+
+    # What this environment turns on decides which catalog items go in. Bundles that came
+    # from service YAMLs or kit.yml alone go into every environment.
+    catalog = load_catalog(repo_path("broadcom/catalog.yml"))
+    choices, problems = wanted_items(inv, catalog)
+    if problems:
+        for problem in problems:
+            row("FAIL", problem)
+        die("fix broadcom_items first")
+    carried = {(b.get("item"), b.get("version")) for b in bundles if b.get("item")}
+    absent = ["%s %s" % (key, v) for key, versions in choices.items() for v in versions if (key, v) not in carried]
+    if absent:
+        die("%s turns on %s, which this transfer doesn't carry. Turn the same on for %s on the connected "
+            "side, run python3 kit fetch, and bring that transfer in" % (inv.where("broadcom_items"), ", ".join(absent), args.env))
+    selected = [b for b in bundles if not b.get("item") or b.get("version") in choices.get(b["item"], [])]
+    skipped = sorted({"%s %s" % (b["item"], b["version"]) for b in bundles if b not in selected})
+
+    registry = args.registry or inv.literal("harbor_hostname")
+    if not registry or "CHANGE_ME" in registry:
+        die("set harbor_hostname in %s, or pass --registry <fqdn>" % inv.where("harbor_hostname"))
+    projects = {"library"} | {catalog[key]["project"] for key in choices}
+    for project in inv.vars.get("harbor_projects") or []:
+        projects.add(project.get("name") if isinstance(project, dict) else str(project))
+    missing = sorted({b["project"] for b in selected} - projects)
+    if missing and not args.registry:
+        die("Harbor project(s) %s are not in harbor_projects in %s: add them and run make build-registry first"
+            % (", ".join(missing), inv.where("harbor_projects")))
+    if not selected:
+        log("Nothing in this transfer is for %s%s" % (args.env, " (it carries %s for other environments)" % ", ".join(skipped) if skipped else ""))
+        return
+
+    ca = args.ca
+    if not ca:
+        staged_ca = inv.literal("harbor_tls_staged_ca") or os.path.join(staging, "tls", "ca.crt")
+        ca = next((c for c in (staged_ca, "/etc/ipa/ca.crt") if c and os.path.isfile(c)), None)
+    imgpkg = shutil.which("imgpkg") or os.path.join(bdir, "tools", "imgpkg")
+    if not os.path.isfile(imgpkg):
+        die("imgpkg not found: it should be in %s/tools" % bdir)
+    if os.access(imgpkg, os.W_OK):
+        os.chmod(imgpkg, 0o755)
+    user = args.user or os.environ.get("HARBOR_USER") or "admin"
+    password = os.environ.get("HARBOR_PASSWORD") or getpass.getpass("Harbor password for %s on %s: " % (user, registry))
+    env = dict(os.environ, IMGPKG_REGISTRY_HOSTNAME=registry, IMGPKG_REGISTRY_USERNAME=user,
+               IMGPKG_REGISTRY_PASSWORD=password)
+
+    step("Pushing %d bundle(s) into %s" % (len(selected), registry))
+    for b in selected:
+        repo = "%s/%s/%s" % (registry, b["project"], b["repo"])
+        cmd = [imgpkg, "copy", "--tar", os.path.join(bdir, b["tar"]), "--to-repo", repo]
+        if ca:
+            cmd += ["--registry-ca-cert-path", ca]
+        code, _ = run(cmd + imgpkg_extra_args(), env=env)
+        if code:
+            die("imgpkg could not push %s to %s (see above). If its project is new, run make build-registry ENV=%s first"
+                % (b["tar"], repo, args.env), 2)
+        b["target"] = repo + (":" + b["tag"] if b["tag"] else "@" + b["digest"])
+        row("OK", "%s %s" % (b["item"], b["version"]) if b.get("item") else b["ref"], "-> " + b["target"])
+    if skipped:
+        log("Not for %s, so left in the transfer: %s" % (args.env, ", ".join(skipped)))
+
+    relocated = {}
+    services_dir = os.path.join(bdir, "services")
+    if os.path.isdir(services_dir):
+        out_dir = os.path.join(bdir, "relocated")
+        os.makedirs(out_dir, exist_ok=True)
+        step("Service YAMLs pointing at %s" % registry)
+        for name in sorted(os.listdir(services_dir)):
+            mine = [b for b in bundles if name in b.get("services", [])]
+            if any("target" not in b for b in mine):
+                row("--", name, "skipped: %s isn't turned on for %s" % (
+                    ", ".join("%s %s" % (b["item"], b["version"]) for b in mine if "target" not in b), args.env))
+                continue
+            with open(os.path.join(services_dir, name), encoding="utf-8") as handle:
+                text = handle.read()
+            for b in mine:
+                text = text.replace(b["ref"], b["target"])
+                relocated[b["ref"]] = os.path.join(out_dir, name)
+            with open(os.path.join(out_dir, name), "w", encoding="utf-8") as handle:
+                handle.write(text)
+            row("OK", os.path.join(out_dir, name))
+
+    items = {}
+    for b in selected:
+        if b.get("item"):
+            items.setdefault((b["item"], b["version"]), []).append(b)
+    if items or relocated:
+        step("Next")
+    for (key, version), group in items.items():
+        kind = group[0].get("item_kind") or catalog.get(key, {}).get("kind")
+        first = group[0]
+        if kind == "supervisor-service":
+            detail = ("add %s in vCenter" % relocated[first["ref"]] if first["ref"] in relocated else
+                      "add Broadcom's YAML for it in vCenter, with its image set to %s" % first["target"])
+        elif kind == "addon-repository":
+            detail = "point VKS at %s (imageURL in an AddonRepository on VKS 3.7 and later)" % first["target"]
+        else:
+            charts = [b for b in group if "/helm-charts/" in "/" + b["repo"]]
+            detail = "images and charts in %s/%s" % (registry, first["project"])
+            if charts:
+                detail += "; helm install ... oci://%s --version %s, with the chart's image repositories set to %s/%s" % (
+                    charts[0]["target"].rsplit(":", 1)[0], charts[0]["tag"], registry, first["project"])
+        row("", "%s %s" % (key, version), detail, width=28)
+    if relocated:
+        log("Supervisor Services go in under Workload Management > Services > Add New Service")
+        log("(or Add New Version for a service that is already registered).")
+    step("Done")
+
+
+def cmd_catalog(args):
+    catalog = load_catalog(repo_path("broadcom/catalog.yml"))
+    if not catalog:
+        die("there is no broadcom/catalog.yml in %s" % REPO)
+    envs = [args.env] if args.env else [name for name in inventory_names() if not name.startswith("_")]
+    turned_on = {}
+    for env in envs:
+        choices, problems = wanted_items(Inventory(env), catalog)
+        for problem in problems:
+            row("FAIL", problem)
+        for key, versions in choices.items():
+            for version in versions:
+                turned_on.setdefault(key, []).append("%s %s" % (env, version))
+    step("broadcom/catalog.yml: what each environment can turn on in group_vars/registry/broadcom.yml")
+    for key, item in catalog.items():
+        versions = list(item["versions"])
+        print("")
+        row("", key, item.get("name", ""), width=28)
+        row("", "", "versions %s (default %s); goes to Harbor project %s" % (
+            ", ".join(versions[:6]) + (", ..." if len(versions) > 6 else ""), item["default"], item["project"]), width=28)
+        if item.get("needs"):
+            row("", "", "needs " + str(item["needs"]), width=28)
+        row("", "", "on in: " + (", ".join(turned_on.get(key, [])) or "none of %s" % ", ".join(envs)), width=28)
+    print("")
+
+
+# --- entry point -------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(prog="python3 kit", description=__doc__.split("\n\n")[0],
+                                     epilog="Run 'python3 kit <command> --help' for each command.")
+    parser.add_argument("--config", default=os.path.join(REPO, "kit.yml"), help="default: kit.yml next to this tool")
+    commands = parser.add_subparsers(dest="command", metavar="command")
+
+    commands.add_parser("check", help="check kit.yml, the tools, and that every source can be reached")
+    commands.add_parser("fetch", help="download and verify everything into one transfer folder")
+    catalog = commands.add_parser("catalog", help="what broadcom/catalog.yml offers and what each environment turns on")
+    catalog.add_argument("--env", help="only this inventory")
+
+    verify = commands.add_parser("verify", help="check a transfer against its SHA256SUMS")
+    verify.add_argument("--from", dest="from_dir", required=True, metavar="DIR", help="the transfer folder")
+
+    publish = commands.add_parser("publish", help="inside: verify, stage, and upload the Harbor files to Nexus")
+    publish.add_argument("--from", dest="from_dir", required=True, metavar="DIR", help="the transfer folder")
+    publish.add_argument("--env", required=True, help="the inventory under inventories/, e.g. prod")
+    publish.add_argument("--nexus", help="Nexus URL, when the inventory has nexus_enabled: true; default nexus_url")
+    publish.add_argument("--cacert", help="CA bundle for Nexus's certificate, e.g. /etc/ipa/ca.crt")
+    publish.add_argument("--staging", help="default artifact_staging from the inventory")
+    publish.add_argument("--skip-nexus", action="store_true", help="stage only; publish later")
+
+    load = commands.add_parser("load", help="inside, after make build-registry: push the Broadcom bundles into Harbor")
+    load.add_argument("--env", required=True, help="the inventory under inventories/, e.g. prod")
+    load.add_argument("--from", dest="from_dir", metavar="DIR", help="default <staging>/broadcom")
+    load.add_argument("--registry", help="Harbor's name; default harbor_hostname from the inventory")
+    load.add_argument("--user", help="Harbor user; default admin, or HARBOR_USER. The password comes from "
+                                     "HARBOR_PASSWORD or a prompt")
+    load.add_argument("--ca", help="CA for Harbor's certificate; default the staged one (harbor_tls_staged_ca), "
+                                   "or /etc/ipa/ca.crt")
+    load.add_argument("--staging", help="default artifact_staging from the inventory")
+
+    args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        return 1
+    handlers = {"check": cmd_check, "fetch": cmd_fetch, "catalog": cmd_catalog, "verify": cmd_verify,
+                "publish": cmd_publish, "load": cmd_load}
+    try:
+        handlers[args.command](args)
+        return 0
+    except KitError as error:
+        print("", flush=True)
+        log("ERROR: %s" % error)
+        return error.code
+    except KeyboardInterrupt:
+        print("", flush=True)
+        log("Stopped. Nothing half-written was kept.")
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

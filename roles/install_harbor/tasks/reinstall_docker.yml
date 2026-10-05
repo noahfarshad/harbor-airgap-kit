@@ -1,0 +1,9 @@
+---
+# tasks file for install_harbor: apply changed settings (Docker)
+
+- name: Re-run the Harbor installer
+  ansible.builtin.command:
+    cmd: "./install.sh{{ ' --with-trivy' if harbor_with_trivy | bool else '' }}"
+    chdir: "{{ harbor_install_dir }}"
+  changed_when: true
+  timeout: 1800

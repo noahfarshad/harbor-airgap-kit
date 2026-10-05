@@ -1,0 +1,234 @@
+# broadcom/catalog.yml: the Broadcom content this kit knows how to carry.
+#
+# Each environment turns items on in inventories/<env>/group_vars/registry/broadcom.yml:
+#
+#   broadcom_items:
+#     argocd-service: true          # the default version below
+#     contour: "1.33.5"             # this version
+#     vks: ["3.6.3", "3.7.1"]       # several, e.g. to carry an upgrade path
+#     velero-operator: false        # not this one
+#
+# python3 kit fetch carries what any environment turns on, make build-registry
+# creates the Harbor projects they go to, and python3 kit load --env <env> pushes
+# that environment's items. python3 kit catalog shows what is here and who uses it.
+#
+# Every reference below was read from projects.packages.broadcom.com on
+# 2026-10-05; none of them needs a Broadcom login. To add a version, put it at
+# the top of the item's versions and run python3 kit check.
+#
+# kind:
+#   supervisor-service   a bundle the Supervisor installs from; its YAML comes from
+#                        support.broadcom.com (vSphere Supervisor Services; on VCF 9.1,
+#                        the "legacy" YAML) and goes in broadcom/services/
+#   addon-repository     the repository VKS clusters install add-ons from
+#   images               images and Helm charts, copied as they are
+# repo_path_after:       keep the source path after this in Harbor, instead of only
+#                        its last part (so a chart and an image of the same name
+#                        don't land in the same repository)
+
+# --- Supervisor Services ------------------------------------------------------------
+
+argocd-service:
+  name: Argo CD Service
+  kind: supervisor-service
+  project: sup-services
+  needs: vSphere 8.0 U3g or later with a VCF entitlement, or VCF 9.0.1 or later
+  default: "1.2.0"
+  versions:
+    "1.2.0": projects.packages.broadcom.com/vsphere/supervisor/argocd-service/1.2.0/argocd-service:v1.2.0_vmware.1
+    "1.1.0": projects.packages.broadcom.com/vsphere/supervisor/argocd-service/1.1.0/argocd-service:v1.1.0_vmware.1
+    "1.0.1": projects.packages.broadcom.com/vsphere/supervisor/argocd-service/1.0.1/argocd-service:v1.0.1_vmware.1
+    "1.0.0": projects.packages.broadcom.com/vsphere/supervisor/argocd-service/1.0.0/argocd-service:v1.0.0_vmware.1
+
+contour:
+  name: Contour (Kubernetes ingress)
+  kind: supervisor-service
+  project: sup-services
+  needs: vSphere 8.0 U3 or later
+  default: "1.33.5"
+  versions:
+    "1.33.5": projects.packages.broadcom.com/vsphere/supervisor/contour/1.33.5/contour:v1.33.5_vmware.1-vks.1
+    "1.33.1": projects.packages.broadcom.com/vsphere/supervisor/contour/1.33.1/contour:v1.33.1_vmware.2-vks.1
+    "1.32.0": projects.packages.broadcom.com/vsphere/supervisor/contour/1.32.0/contour:v1.32.0_vmware.1-vks.1
+    "1.31.1": projects.packages.broadcom.com/vsphere/supervisor/contour/1.31.1/contour:v1.31.1_vmware.1-vks.1
+
+external-dns:
+  name: ExternalDNS
+  kind: supervisor-service
+  project: sup-services
+  needs: vSphere 8.0 U3 or later
+  default: "0.21.0"
+  versions:
+    "0.21.0": projects.packages.broadcom.com/vsphere/supervisor/external-dns/0.21.0/external-dns:v0.21.0_vmware.2-vks.1
+    "0.18.0": projects.packages.broadcom.com/vsphere/supervisor/external-dns/0.18.0/external-dns:v0.18.0_vmware.3-vks.1
+    "0.16.1": projects.packages.broadcom.com/vsphere/supervisor/external-dns/0.16.1/external-dns:v0.16.1_vmware.2-vks.1
+
+velero-operator:
+  name: Velero vSphere Operator (backup and restore)
+  kind: supervisor-service
+  project: sup-services
+  needs: vSphere 8.0 U3 or later
+  default: "1.8.1"
+  versions:
+    "1.8.1": projects.packages.broadcom.com/velero/velero-vsphere:1.8.1
+    "1.8.0": projects.packages.broadcom.com/velero/velero-vsphere:1.8.0
+
+consumption-interface:
+  name: Local Consumption Interface (the namespace UI)
+  kind: supervisor-service
+  project: sup-services
+  needs: vSphere 8.0 U3 or later; uninstall 1.0.x before moving to 9.x
+  default: "9.1.2"
+  versions:
+    "9.1.2": projects.packages.broadcom.com/vsphere/iaas/lci-service/9.1.2/lci-package:9.1.2-516b3a9f
+    "9.1.1": projects.packages.broadcom.com/vsphere/iaas/lci-service/9.1.1/lci-package:9.1.1-9a2924cb
+    "9.1.0": projects.packages.broadcom.com/vsphere/iaas/lci-service/9.1.0/lci-package:9.1.0-b2d0d12e
+    "9.0.2": projects.packages.broadcom.com/vsphere/iaas/lci-service/9.0.2/lci-service:9.0.2-f943fb89
+    "9.0.1": projects.packages.broadcom.com/vsphere/iaas/lci-service/9.0.1/lci-service:9.0.1-1815f87b
+    "9.0.0": projects.packages.broadcom.com/vsphere/iaas/lci-service/9.0.0/lci-service:9.0.0-8594cb6b
+
+ca-clusterissuer:
+  name: CA Cluster Issuer (cert-manager issuer on the Supervisor)
+  kind: supervisor-service
+  project: sup-services
+  needs: vSphere 8.0 U3 or later
+  default: "9.1.1"
+  versions:
+    "9.1.1": projects.packages.broadcom.com/vsphere/iaas/ca-clusterissuer/9.1.1/ca-clusterissuer-bundle:v9.1.1
+    "0.0.2": projects.packages.broadcom.com/vsphere/iaas/ca-clusterissuer/0.0.2/ca-clusterissuer-bundle:v0.0.2
+
+harbor-service:
+  name: Harbor as a Supervisor Service (only if you also run Harbor on the Supervisor)
+  kind: supervisor-service
+  project: sup-services
+  needs: vSphere 8.0 U3 or later
+  default: "2.15.2"
+  versions:
+    "2.15.2": projects.packages.broadcom.com/vsphere/supervisor/harbor-service/2.15.2/harbor:v2.15.2_vmware.1-vks.1
+    "2.14.3": projects.packages.broadcom.com/vsphere/supervisor/harbor-service/2.14.3/harbor:v2.14.3_vmware.2-vks.1
+    "2.14.2": projects.packages.broadcom.com/vsphere/supervisor/harbor-service/2.14.2/harbor:v2.14.2_vmware.2-vks.1
+
+secret-store:
+  name: Secret Store Service
+  kind: supervisor-service
+  project: sup-services
+  needs: VCF 9
+  default: "9.1.1.0"
+  versions:
+    "9.1.1.0": projects.packages.broadcom.com/vsphere/supervisor/vcf-service-secret-store/9.1.1.0/secret-store-service:9.1.1.0.25710217
+    "9.1.0.0100": projects.packages.broadcom.com/vsphere/supervisor/vcf-service-secret-store/9.1.0.0100/secret-store-service:9.1.0.0100.25416073
+    "9.1.0.0": projects.packages.broadcom.com/vsphere/supervisor/vcf-service-secret-store/9.1.0.0/secret-store-service:9.1.0.0.25367485
+
+dsm-consumption-operator:
+  name: Data Services Manager Consumption Operator (only with DSM)
+  kind: supervisor-service
+  project: sup-services
+  needs: VCF 9
+  default: "9.1.1.0"
+  versions:
+    "9.1.1.0": projects.packages.broadcom.com/vsphere/supervisor/dsm-consumption-operator/9.1.1.0/dsm-consumption-operator-supervisor:9.1.1.0.25623779
+    "9.1.0.0": projects.packages.broadcom.com/vsphere/supervisor/dsm-consumption-operator/9.1.0.0/dsm-consumption-operator-supervisor:9.1.0.0.25261877
+
+supervisor-management-proxy:
+  name: Supervisor Management Proxy
+  kind: supervisor-service
+  project: sup-services
+  needs: VCF 9
+  default: "9.1.1"
+  versions:
+    "9.1.1": projects.packages.broadcom.com/vsphere/iaas/supervisor-management-proxy-service/9.1.1/supervisor-management-proxy-bundle:9.1.1
+    "0.4.1": projects.packages.broadcom.com/vsphere/iaas/supervisor-management-proxy-service/0.4.1/supervisor-management-proxy-bundle:0.4.1
+    "0.4.0": projects.packages.broadcom.com/vsphere/iaas/supervisor-management-proxy-service/0.4.0/supervisor-management-proxy-service:0.4.0
+    "0.3.0": projects.packages.broadcom.com/vsphere/iaas/supervisor-management-proxy-service/0.3.0/supervisor-management-proxy-service:0.3.0
+
+nsx-management-proxy:
+  name: NSX Management Proxy (vSphere 8 with NSX; on VCF 9 use the Supervisor Management Proxy)
+  kind: supervisor-service
+  project: sup-services
+  needs: vSphere 8.0 U3 or later with NSX
+  default: "0.2.2"
+  versions:
+    "0.2.2": projects.packages.broadcom.com/vsphere/iaas/nsx-management-proxy-service/0.2.2/nsx-management-proxy-service:0.2.2
+    "0.2.1": projects.packages.broadcom.com/vsphere/iaas/nsx-management-proxy-service/0.2.1/nsx-management-proxy-service:0.2.1
+    "0.1.1": projects.packages.broadcom.com/vsphere/iaas/nsx-management-proxy-service/0.1.1/nsx-management-proxy-service:0.1.1
+
+# --- VKS ------------------------------------------------------------------------------
+
+vks:
+  name: vSphere Kubernetes Service itself, for upgrading it without internet access
+  kind: supervisor-service
+  project: vks
+  needs: vSphere 8.0 U3 or later. Broadcom says not to host it on a Harbor that runs on VKS
+  default: "3.7.1"
+  versions:
+    "3.7.1": projects.packages.broadcom.com/vsphere/iaas/vsphere-kubernetes-service/3.7.1/vsphere-kubernetes-service:3.7.1
+    "3.7.0": projects.packages.broadcom.com/vsphere/iaas/vsphere-kubernetes-service/3.7.0/vsphere-kubernetes-service:3.7.0
+    "3.6.3": projects.packages.broadcom.com/vsphere/iaas/vsphere-kubernetes-service/3.6.3/vsphere-kubernetes-service:3.6.3
+    "3.6.2": projects.packages.broadcom.com/vsphere/iaas/vsphere-kubernetes-service/3.6.2/vsphere-kubernetes-service:3.6.2
+    "3.6.1": projects.packages.broadcom.com/vsphere/iaas/vsphere-kubernetes-service/3.6.1/vsphere-kubernetes-service:3.6.1
+    "3.6.0": projects.packages.broadcom.com/vsphere/iaas/vsphere-kubernetes-service/3.6.0/vsphere-kubernetes-service:3.6.0
+    "3.5.1": projects.packages.broadcom.com/vsphere/iaas/tkg-service/3.5.1/tkg-service:3.5.1
+    "3.5.0": projects.packages.broadcom.com/vsphere/iaas/tkg-service/3.5.0/tkg-service:3.5.0
+    "3.4.2": projects.packages.broadcom.com/vsphere/iaas/tkg-service/3.4.2/tkg-service:3.4.2
+    "3.4.1": projects.packages.broadcom.com/vsphere/iaas/tkg-service/3.4.1/tkg-service:3.4.1
+    "3.4.0": projects.packages.broadcom.com/vsphere/iaas/tkg-service/3.4.0/tkg-service:3.4.0
+    "3.3.3": projects.packages.broadcom.com/vsphere/iaas/tkg-service/3.3.3/tkg-service:3.3.3
+    "3.3.2": projects.packages.broadcom.com/vsphere/iaas/tkg-service/3.3.2/tkg-service:3.3.2
+    "3.3.1": projects.packages.broadcom.com/vsphere/iaas/tkg-service/3.3.1/tkg-service:3.3.1
+    "3.3.0": projects.packages.broadcom.com/vsphere/iaas/tkg-service/3.3.0/tkg-service:3.3.0
+    "3.2.0": projects.packages.broadcom.com/vsphere/iaas/tkg-service/3.2.0/tkg-service:3.2.0
+    "3.1.1": projects.packages.broadcom.com/vsphere/iaas/tkg-service/3.1.1/tkg-service:3.1.1
+    "3.1.0": projects.packages.broadcom.com/vsphere/iaas/tkg-service/3.1.0/tkg-service:3.1.0
+
+vks-addons:
+  name: VKS add-ons repository (the standard packages before VKS 3.7)
+  kind: addon-repository
+  project: tanzu-packages
+  needs: the release that matches the environment's VKS version (3.7.0-* for VKS 3.7, 3.6.0-* for 3.6)
+  default: "3.7.0-20260924"
+  versions:
+    "3.7.0-20260924": projects.packages.broadcom.com/vsphere/supervisor/vks-standard-packages/3.7.0-20260924/vks-addons:3.7.0-20260924
+    "3.7.0-20260827": projects.packages.broadcom.com/vsphere/supervisor/vks-standard-packages/3.7.0-20260827/vks-addons:3.7.0-20260827
+    "3.7.0-20260723": projects.packages.broadcom.com/vsphere/supervisor/vks-standard-packages/3.7.0-20260723/vks-addons:3.7.0-20260723
+    "3.7.0-20260618": projects.packages.broadcom.com/vsphere/supervisor/vks-standard-packages/3.7.0-20260618/vks-addons:3.7.0-20260618
+    "3.6.0-20260521": projects.packages.broadcom.com/vsphere/supervisor/vks-standard-packages/3.6.0-20260521/vks-standard-packages:3.6.0-20260521
+    "3.6.0-20260416": projects.packages.broadcom.com/vsphere/supervisor/vks-standard-packages/3.6.0-20260416/vks-standard-packages:3.6.0-20260416
+    "3.6.0-20260320": projects.packages.broadcom.com/vsphere/supervisor/vks-standard-packages/3.6.0-20260320/vks-standard-packages:3.6.0-20260320
+    "3.6.0-20260211": projects.packages.broadcom.com/vsphere/supervisor/vks-standard-packages/3.6.0-20260211/vks-standard-packages:3.6.0-20260211
+    "3.5.0-20251218": projects.packages.broadcom.com/vsphere/supervisor/vks-standard-packages/3.5.0-20251218/vks-standard-packages:3.5.0-20251218
+    "3.5.0-20251022": projects.packages.broadcom.com/vsphere/supervisor/packages/2025.10.22/vks-standard-packages:3.5.0-20251022
+    "2025.8.19": projects.packages.broadcom.com/vsphere/supervisor/packages/2025.8.19/vks-standard-packages:v2025.8.19
+    "2025.6.17": projects.packages.broadcom.com/vsphere/supervisor/packages/2025.6.17/vks-standard-packages:v2025.6.17
+    "2025.5.19": projects.packages.broadcom.com/vsphere/supervisor/packages/2025.5.19/vks-standard-packages:v2025.5.19
+    "2025.3.21": projects.packages.broadcom.com/vsphere/supervisor/packages/2025.3.21/vks-standard-packages:v2025.3.21
+
+# --- In VKS clusters --------------------------------------------------------------------
+
+ako:
+  name: Avi Kubernetes Operator (AKO), images and Helm charts
+  kind: images
+  project: ako
+  repo_path_after: ako/
+  needs: an Avi Controller the clusters can reach. On VKS 3.7 and later, AKO is also a VKS add-on (vks-addons)
+  default: "2.1.4"
+  versions:
+    "2.1.4":
+      - projects.packages.broadcom.com/ako/ako:2.1.4
+      - projects.packages.broadcom.com/ako/ako-gateway-api:2.1.4
+      - projects.packages.broadcom.com/ako/ako-crd-operator:2.1.4
+      - projects.packages.broadcom.com/ako/helm-charts/ako:2.1.4
+      - projects.packages.broadcom.com/ako/helm-charts/ako-crd-operator:2.1.4
+    "2.1.3":
+      - projects.packages.broadcom.com/ako/ako:2.1.3
+      - projects.packages.broadcom.com/ako/ako-gateway-api:2.1.3
+      - projects.packages.broadcom.com/ako/ako-crd-operator:2.1.3
+      - projects.packages.broadcom.com/ako/helm-charts/ako:2.1.3
+      - projects.packages.broadcom.com/ako/helm-charts/ako-crd-operator:2.1.3
+    "1.13.4":
+      - projects.packages.broadcom.com/ako/ako:1.13.4
+      - projects.packages.broadcom.com/ako/ako-gateway-api:1.13.4
+      - projects.packages.broadcom.com/ako/helm-charts/ako:1.13.4
+    "1.12.3":
+      - projects.packages.broadcom.com/ako/ako:1.12.3
+      - projects.packages.broadcom.com/ako/ako-gateway-api:1.12.3
+      - projects.packages.broadcom.com/ako/helm-charts/ako:1.12.3

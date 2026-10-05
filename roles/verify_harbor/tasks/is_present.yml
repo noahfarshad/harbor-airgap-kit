@@ -1,0 +1,124 @@
+---
+# tasks file for verify_harbor: present (read-only)
+#
+# Fails on: a missing core container, an unhealthy component, a missing
+# project, or a served certificate that has expired. Warns when the served
+# certificate is inside its renewal window or differs from the one on disk.
+
+- name: List the running containers
+  ansible.builtin.command:
+    cmd: "{{ harbor_container_runtime }} ps --format {% raw %}'{{.Names}}'{% endraw %}"
+  register: harbor_verify_ps
+  changed_when: false
+
+- name: Confirm every core Harbor container is running
+  ansible.builtin.assert:
+    that:
+      - harbor_verify_expected_containers | difference(harbor_verify_ps.stdout_lines) | length == 0
+    fail_msg: "Not running: {{ harbor_verify_expected_containers | difference(harbor_verify_ps.stdout_lines) | join(', ') }}"
+    quiet: true
+
+- name: Check the API reports healthy
+  ansible.builtin.uri:
+    url: "{{ harbor_api_url }}/health"
+    validate_certs: "{{ harbor_api_validate_certs }}"
+  register: harbor_verify_health
+  changed_when: false
+
+- name: Confirm every component is healthy
+  ansible.builtin.assert:
+    that:
+      - harbor_verify_health.json.status == 'healthy'
+    fail_msg: >-
+      Harbor reports {{ harbor_verify_health.json.status }}:
+      {{ harbor_verify_health.json.components | default([]) | rejectattr('status', 'equalto', 'healthy') | map(attribute='name') | join(', ') }}
+    quiet: true
+
+- name: List the projects
+  ansible.builtin.uri:
+    url: "{{ harbor_api_url }}/projects?page_size=100"
+    force_basic_auth: true
+    url_username: admin
+    url_password: "{{ harbor_admin_password }}"
+    validate_certs: "{{ harbor_api_validate_certs }}"
+  register: harbor_verify_projects
+  changed_when: false
+  no_log: true
+
+- name: Confirm every expected project exists
+  ansible.builtin.assert:
+    that:
+      - item.name in (harbor_verify_projects.json | map(attribute='name') | list)
+    fail_msg: "Project {{ item.name }} is missing."
+    quiet: true
+  loop: "{{ harbor_projects | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Confirm the projects for the Broadcom items exist
+  ansible.builtin.assert:
+    that:
+      - item in (harbor_verify_projects.json | map(attribute='name') | list)
+    fail_msg: "Project {{ item }} is missing: the environment's Broadcom items go there. Run make build-registry."
+    quiet: true
+  loop: "{{ harbor_item_projects }}"
+
+- name: Read the certificate Harbor is serving
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail &&
+      openssl s_client -connect {{ harbor_hostname }}:{{ harbor_https_port | default(443) }}
+      -servername {{ harbor_hostname }} </dev/null 2>/dev/null
+      | openssl x509 -noout -fingerprint -sha256 -enddate
+    executable: /bin/bash
+  register: harbor_verify_served
+  changed_when: false
+
+- name: Stop if no certificate came back from the endpoint
+  ansible.builtin.assert:
+    that:
+      - harbor_verify_served.stdout_lines | select('match', 'notAfter=') | list | length > 0
+    fail_msg: "No certificate was returned by {{ harbor_hostname }}:{{ harbor_https_port | default(443) }}."
+    quiet: true
+
+- name: Read the certificate on disk
+  ansible.builtin.command:
+    cmd: "openssl x509 -in {{ harbor_tls_cert }} -noout -fingerprint -sha256"
+  register: harbor_verify_ondisk
+  changed_when: false
+
+- name: Work out the served certificate's remaining life
+  ansible.builtin.set_fact:
+    harbor_verify_cert_days: >-
+      {{ (((harbor_verify_served.stdout_lines | select('match', 'notAfter=') | first | replace('notAfter=', ''))
+          | to_datetime('%b %d %H:%M:%S %Y GMT')) - now(utc=true).replace(tzinfo=None)).days }}
+    harbor_verify_cert_match: >-
+      {{ (harbor_verify_served.stdout_lines | select('search', 'Fingerprint') | first | default(''))
+         == (harbor_verify_ondisk.stdout | trim) }}
+
+- name: Stop if the served certificate has expired
+  ansible.builtin.assert:
+    that:
+      - harbor_verify_cert_days | int > 0
+    fail_msg: "The certificate Harbor serves has expired."
+    quiet: true
+
+- name: Word the certificate findings
+  ansible.builtin.set_fact:
+    harbor_verify_cert_note: >-
+      {{ '' if harbor_verify_cert_days | int > harbor_verify_cert_warn_days | int
+         else ', inside the renewal window' }}
+    harbor_verify_match_note: >-
+      {{ 'matches the certificate on disk' if harbor_verify_cert_match | bool
+         else 'DIFFERS from the certificate on disk; check harbor-cert-sync' }}
+
+- name: Summary
+  ansible.builtin.debug:
+    msg:
+      - "Endpoint:    https://{{ harbor_hostname }}:{{ harbor_https_port | default(443) }}"
+      - "Runtime:     {{ harbor_container_runtime }}"
+      - "Health:      {{ harbor_verify_health.json.status }}"
+      - "Containers:  {{ harbor_verify_expected_containers | intersect(harbor_verify_ps.stdout_lines) | join(', ') }}"
+      - "Projects:    {{ harbor_verify_projects.json | map(attribute='name') | list | join(', ') }}"
+      - "Certificate: {{ harbor_verify_cert_days }} days left{{ harbor_verify_cert_note }}"
+      - "Served copy: {{ harbor_verify_match_note }}"

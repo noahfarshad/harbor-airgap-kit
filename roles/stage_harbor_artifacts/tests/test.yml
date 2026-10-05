@@ -1,0 +1,6 @@
+---
+- name: Smoke-test stage_harbor_artifacts
+  hosts: localhost
+  remote_user: root
+  roles:
+    - stage_harbor_artifacts

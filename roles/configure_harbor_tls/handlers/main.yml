@@ -1,0 +1,7 @@
+---
+# handlers file for configure_harbor_tls
+
+- name: Update the CA trust
+  ansible.builtin.command:
+    cmd: update-ca-trust extract
+  changed_when: true

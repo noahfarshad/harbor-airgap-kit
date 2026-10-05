@@ -1,0 +1,35 @@
+---
+# defaults file for install_podman_offline
+#
+# Podman itself comes from RHEL 9 (AppStream / BaseOS) through the environment's
+# yum repository. The compose provider is the only piece that isn't in RHEL:
+#   podman-compose: from EPEL, served by Nexus's yum repo or staged as RPMs
+#   docker-compose: Docker's static binary, run against Podman's API socket
+
+podman_offline_packages:
+  - podman
+  - container-selinux
+  - policycoreutils-python-utils
+  - netavark                      # named explicitly: hosts built with install_weak_deps=False
+  - aardvark-dns                  # skip it, and containers then can't resolve each other
+podman_offline_compose_provider: "{{ harbor_podman_compose_provider | default('podman-compose') }}"
+
+# podman-compose
+podman_offline_compose_source: staged        # staged (RPMs staged on disk) | yum (a repository the server reads)
+
+# yum source: a repository that carries podman-compose, such as the Nexus yum
+# repository make publish-harbor fills. Empty = the server's existing repositories.
+podman_offline_yum_repo_url: ""
+podman_offline_yum_repo_name: harbor-epel
+podman_offline_yum_gpgkey: ""                # URL of RPM-GPG-KEY-EPEL-9, uploaded with the Harbor files
+podman_offline_yum_username: ""              # only if the repository needs a login
+podman_offline_yum_password: ""
+podman_offline_rpm_path: "harbor/podman"     # under artifact_staging
+podman_offline_landing_dir: "{{ stage_root | default('/var/staging') }}/podman-rpms"
+podman_offline_gpg_key: "harbor/RPM-GPG-KEY-EPEL-9"   # under artifact_staging: imported before staged RPMs are installed
+podman_offline_disable_gpg_check: false      # true skips the signature check on staged RPMs; avoid
+
+# docker-compose binary (provider docker-compose)
+podman_offline_docker_compose_file: "harbor/docker-compose-linux-x86_64"   # under artifact_staging, or artifact_repo_url
+podman_offline_docker_compose_sha256: ""     # from harbor_artifacts.yml
+podman_offline_docker_compose_bin: /usr/local/bin/docker-compose

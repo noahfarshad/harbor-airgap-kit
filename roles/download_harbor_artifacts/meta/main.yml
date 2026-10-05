@@ -1,0 +1,16 @@
+---
+galaxy_info:
+  role_name: download_harbor_artifacts
+  author: Noah Farshad
+  description: "Place the Harbor offline installer on the registry host from the environment repository or attached storage, and verify its checksum."
+  license: GPL-3.0-only
+  min_ansible_version: "2.16"
+  platforms:
+    - name: EL
+      versions:
+        - "9"
+  galaxy_tags:
+    - harbor
+    - airgap
+    - artifacts
+dependencies: []

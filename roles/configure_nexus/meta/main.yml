@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: configure_nexus
+  author: Noah Farshad
+  description: "The Nexus Repository 3 repositories, roles and accounts harbor-airgap-kit uses, through Nexus's REST API."
+  license: GPL-3.0-only
+  min_ansible_version: "2.14"
+  platforms:
+    - name: EL
+      versions:
+        - "9"
+  galaxy_tags:
+    - nexus
+    - repository
+dependencies: []

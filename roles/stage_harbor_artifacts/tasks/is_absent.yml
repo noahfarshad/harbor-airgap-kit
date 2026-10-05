@@ -1,0 +1,9 @@
+---
+# tasks file for stage_harbor_artifacts: absent
+#
+# Removes the local copy. Nothing is deleted from the repository.
+
+- name: Remove the local copy
+  ansible.builtin.file:
+    path: "{{ stage_harbor_output_dir }}"
+    state: absent

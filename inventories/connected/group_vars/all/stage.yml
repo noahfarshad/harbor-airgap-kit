@@ -1,0 +1,18 @@
+---
+# inventories/connected/group_vars/all/stage.yml
+#
+# What make stage-harbor puts in the Harbor files. Run it on a RHEL 9 host at
+# the same minor release as the registry servers, with EPEL enabled.
+
+stage_harbor_version:                  "2.15.2"
+stage_harbor_runtime:                  podman            # podman | docker
+stage_harbor_podman_compose_provider:  podman-compose    # podman-compose | docker-compose
+stage_harbor_podman_rpms:              true              # podman-compose and its dependencies from EPEL
+stage_harbor_docker_compose_version:   ""                # v2 release tag, for the docker-compose provider
+stage_harbor_docker_rpms:              false             # true only if the files should carry Docker Engine
+stage_harbor_push:                     false             # no Nexus or Artifactory in the path today
+
+# Check the installer against Harbor's Sigstore signature before anything else
+# happens (needs cosign). On a connected workstation (WSL or Linux), python3 kit
+# fetch does all of this without Ansible.
+stage_harbor_verify_signature:         true

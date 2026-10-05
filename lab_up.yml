@@ -1,0 +1,35 @@
+---
+# lab_up.yml
+#
+# The lab's own infrastructure, on the one machine that plays every part: a CA
+# and a certificate for the lab's names, Nexus Repository in Podman, and Nexus's
+# repos and accounts. Harbor itself gets built afterwards by the same
+# build_registry.yml a real environment uses.
+#
+# Usage:
+#   make lab-up                     # also creates the lab vault on first use
+#   ansible-playbook -i inventories/lab/hosts --vault-password-file .vault_pass lab_up.yml
+
+- name: Build the lab's infrastructure
+  hosts: registry
+  gather_facts: true
+  become: true
+  vars:
+    desired_state: present
+
+  pre_tasks:
+    - name: Confirm this is a RHEL 9-family machine running systemd
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] == 'RedHat'
+          - ansible_facts['distribution_major_version'] == '9'
+          - ansible_facts['service_mgr'] == 'systemd'
+        fail_msg: >-
+          The lab needs AlmaLinux, Rocky or RHEL 9 with systemd running. Under WSL, set
+          [boot] systemd=true in /etc/wsl.conf, then wsl --terminate <distribution>.
+        quiet: true
+
+  roles:
+    - { role: lab_pki, tags: [lab_pki, pki] }
+    - { role: lab_nexus, tags: [lab_nexus, nexus] }
+    - { role: configure_nexus, tags: [configure_nexus, nexus] }

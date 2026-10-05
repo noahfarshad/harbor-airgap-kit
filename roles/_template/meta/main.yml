@@ -1,0 +1,13 @@
+---
+galaxy_info:
+  role_name: rolename
+  author: Noah Farshad
+  description: "One line on what this role puts in place."
+  license: GPL-3.0-only
+  min_ansible_version: "2.16"
+  platforms:
+    - name: EL
+      versions:
+        - "9"
+  galaxy_tags: []
+dependencies: []

@@ -1,0 +1,20 @@
+---
+# defaults file for configure_harbor_tls
+
+harbor_tls_mode: staged                     # staged | ipa
+harbor_tls_cert: "/etc/pki/tls/certs/{{ harbor_hostname }}.crt"
+harbor_tls_key: "/etc/pki/tls/private/{{ harbor_hostname }}.key"
+
+# staged mode: a certificate and key for harbor_hostname, and the CA that issued
+# them, on the control host (artifact_staged_on: controller) or the registry
+# server (target). They sit outside the Harbor files, so publishing the next
+# transfer leaves them alone.
+harbor_tls_staged_cert: "{{ artifact_staging }}/tls/{{ harbor_hostname }}.crt"
+harbor_tls_staged_key: "{{ artifact_staging }}/tls/{{ harbor_hostname }}.key"
+harbor_tls_staged_ca: "{{ artifact_staging }}/tls/ca.crt"    # "" if the server already trusts that CA
+harbor_tls_ca_anchor: /etc/pki/ca-trust/source/anchors/harbor-registry-ca.crt
+
+# ipa mode: the server is an IdM client and the service principal exists
+harbor_tls_principal: "HTTP/{{ harbor_hostname }}"
+harbor_tls_ipa_wait_retries: 30
+harbor_tls_ipa_wait_delay: 10

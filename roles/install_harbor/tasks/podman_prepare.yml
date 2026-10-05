@@ -1,0 +1,91 @@
+---
+# tasks file for install_harbor: run Harbor's prepare container with Podman
+#
+# Mirrors the installer's ./prepare script, which calls docker run. Podman does
+# not create missing bind-mount sources, so the directories are made first.
+
+- name: Create the prepare directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  loop:
+    - "{{ harbor_install_dir }}/input"
+    - "{{ harbor_install_dir }}/common/config"
+
+- name: Stage harbor.yml for the prepare container
+  ansible.builtin.copy:
+    src: "{{ harbor_install_dir }}/harbor.yml"
+    dest: "{{ harbor_install_dir }}/input/harbor.yml"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Read the prepare image the release ships with
+  ansible.builtin.slurp:
+    src: "{{ harbor_install_dir }}/prepare"
+  register: harbor_prepare_script
+
+- name: Use the release's own prepare image reference
+  ansible.builtin.set_fact:
+    harbor_prepare_image: >-
+      {{ (harbor_prepare_script.content | b64decode
+          | regex_search('goharbor/prepare:[A-Za-z0-9._-]+'))
+         | default('goharbor/prepare:v' ~ harbor_version, true) }}
+
+- name: Run Harbor's prepare container
+  ansible.builtin.command:
+    argv: "{{ harbor_prepare_argv + (['--with-trivy'] if harbor_with_trivy | bool else []) }}"
+  vars:
+    harbor_prepare_argv:
+      - podman
+      - run
+      - --rm
+      - --privileged
+      - -v
+      - "{{ harbor_install_dir }}/input:/input"
+      - -v
+      - "{{ harbor_data_volume }}:/data"
+      - -v
+      - "{{ harbor_install_dir }}:/compose_location"
+      - -v
+      - "{{ harbor_install_dir }}/common/config:/config"
+      - -v
+      - "/:/hostfs/"
+      - "{{ harbor_prepare_image }}"
+      - prepare
+  changed_when: true
+
+- name: Remove the prepare input
+  ansible.builtin.file:
+    path: "{{ harbor_install_dir }}/input"
+    state: absent
+
+- name: Apply container labels to the generated files
+  ansible.builtin.command:
+    cmd: "restorecon -Rv {{ harbor_install_dir }}/common {{ harbor_data_volume }}"
+  register: harbor_restorecon
+  changed_when: harbor_restorecon.stdout | length > 0
+  when:
+    - harbor_manage_selinux | bool
+    - ansible_facts.selinux.status | default('disabled') == 'enabled'
+
+- name: Read the generated compose file
+  ansible.builtin.slurp:
+    src: "{{ harbor_install_dir }}/docker-compose.yml"
+  register: harbor_compose_raw
+
+- name: Parse the generated compose file
+  ansible.builtin.set_fact:
+    harbor_compose_src: "{{ harbor_compose_raw.content | b64decode | from_yaml }}"
+
+- name: Write the Podman compose file
+  ansible.builtin.template:
+    src: podman-compose.yml.j2
+    dest: "{{ harbor_install_dir }}/podman-compose.yml"
+    owner: root
+    group: root
+    mode: "0600"

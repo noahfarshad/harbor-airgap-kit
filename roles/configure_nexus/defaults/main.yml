@@ -1,0 +1,36 @@
+---
+# defaults file for configure_nexus
+#
+# Sets up what harbor-airgap-kit needs in a Nexus Repository 3, through its REST
+# API: a raw (hosted) repository for files, a yum (hosted) repository with
+# repodata depth 0 for RPMs, a read role and account for Ansible and dnf, and an
+# upload role and account for `python3 kit publish`. Works on any Nexus 3 the
+# admin account can reach.
+
+nexus_url: ""                                  # e.g. https://nexus.example.com (group_vars/all/artifacts.yml)
+nexus_validate_certs: true
+nexus_admin_user: admin
+nexus_admin_password: ""                       # from the vault
+nexus_admin_initial_password: ""               # first start only: the generated password (lab_nexus reads it)
+nexus_accept_eula: false                       # true accepts Sonatype's Community Edition EULA for whoever runs this
+nexus_anonymous_access: false
+nexus_blob_store: default
+
+nexus_raw_repo: vmware-raw
+nexus_yum_repo: harbor-epel
+nexus_yum_repo_enabled: true                   # only used when the transfer carries podman-compose
+nexus_yum_repodata_depth: 0
+
+nexus_read_role: harbor-kit-read
+nexus_read_user: kit-read
+nexus_read_password: ""
+nexus_upload_role: harbor-kit-upload
+nexus_upload_user: kit-upload
+nexus_upload_password: ""
+nexus_user_email_domain: example.invalid
+
+nexus_wait_retries: 60
+nexus_wait_delay: 10
+
+# --- desired_state: absent ----------------------------------------------------------
+nexus_purge_repositories: false                # true also deletes both repositories and their content

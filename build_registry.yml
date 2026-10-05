@@ -1,0 +1,127 @@
+---
+# build_registry.yml
+#
+# Builds the Harbor container registry from Harbor's offline installer on a
+# RHEL 9 host with no internet access, on Podman by default or on Docker. The
+# Harbor files come from the environment's Nexus or from staged storage, as set in
+# inventories/<env>/group_vars/all/artifacts.yml.
+#
+# Usage:
+#   make build-registry ENV=<env>
+#   # or:
+#   ansible-playbook -i inventories/<env>/hosts build_registry.yml --ask-vault-pass
+#
+# REQUIRED, in inventories/<env>/:
+#   group_vars/all/artifacts.yml              artifact_source and its settings
+#   group_vars/registry/harbor_artifacts.yml  release manifest (written by python3 kit publish)
+#   group_vars/registry/main.yml              runtime, projects, ports, TLS mode
+#   host_vars/<registry host>.yml             harbor_hostname
+#   group_vars/all/vault.yml                  vault_harbor_admin_password, vault_harbor_db_password
+
+- name: Check the inventory before connecting to any server
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Stop on placeholder values
+      ansible.builtin.assert:
+        that:
+          - (hostvars[item].ansible_host | default(item)) is not search('CHANGE_ME|REPLACE')
+          - (hostvars[item].harbor_hostname | default('')) is not search('CHANGE_ME|REPLACE')
+          - (hostvars[item].artifact_source | default('staged')) != 'repo' or
+            (hostvars[item].artifact_repo_url | default('')) is not search('CHANGE_ME|REPLACE')
+        fail_msg: >-
+          {{ item }} still has a CHANGE_ME value. Set registry_server_fqdn and
+          harbor_hostname in its host_vars file, and nexus_url in
+          group_vars/all/artifacts.yml, first.
+        quiet: true
+      loop: "{{ groups['registry'] | default([]) }}"
+
+- name: Build the Harbor container registry
+  hosts: registry
+  gather_facts: true
+  become: true
+  vars:
+    desired_state: present
+
+  pre_tasks:
+    - name: Confirm this playbook is only used to build
+      ansible.builtin.assert:
+        that:
+          - desired_state == 'present'
+        fail_msg: "To take Harbor off a host, run remove_registry.yml (make remove-registry)."
+
+    - name: Confirm the host is a RedHat-family member of [registry]
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] == 'RedHat'
+          - inventory_hostname in groups['registry']
+        fail_msg: "Host must be a RedHat-family member of [registry]"
+
+    - name: Confirm the runtime, release manifest, name and secrets are set
+      ansible.builtin.assert:
+        that:
+          - harbor_container_runtime | default('podman') in ['podman', 'docker']
+          - harbor_installer_sha256 | default('') | length == 64
+          - harbor_hostname | default('') | length > 0
+          - harbor_hostname | default('') is not search('CHANGE_ME|REPLACE')
+          - harbor_admin_password | default('') | length > 0
+          - harbor_db_password | default('') | length > 0
+          - harbor_admin_password | default('') is not search('CHANGE_ME|REPLACE')
+        fail_msg: >-
+          Set harbor_container_runtime to podman or docker, run python3 kit
+          publish so harbor_artifacts.yml has the real sha256, set
+          harbor_hostname in host_vars, and set the Harbor passwords in vault.yml.
+        quiet: true
+
+    - name: Confirm the Harbor files are on the registry host
+      ansible.builtin.stat:
+        path: "{{ artifact_staging }}/{{ harbor_artifact_path | default('harbor') }}/{{ harbor_installer_file }}"
+      register: registry_kit_target
+      failed_when: not (registry_kit_target.stat.exists | default(false))
+      when:
+        - artifact_source == 'staged'
+        - artifact_staged_on | default('target') == 'target'
+
+    - name: Confirm the Harbor files are readable on the control host
+      ansible.builtin.stat:
+        path: "{{ artifact_staging }}/{{ harbor_artifact_path | default('harbor') }}/{{ harbor_installer_file }}"
+      register: registry_kit_controller
+      delegate_to: localhost
+      become: false
+      failed_when: not (registry_kit_controller.stat.readable | default(false))
+      when:
+        - artifact_source == 'staged'
+        - artifact_staged_on | default('target') == 'controller'
+
+  roles:
+    - { role: install_podman_offline, when: harbor_container_runtime | default('podman') == 'podman', tags: [install_podman_offline] }
+    - { role: install_docker_offline, when: harbor_container_runtime | default('podman') == 'docker', tags: [install_docker_offline] }
+    - { role: download_harbor_artifacts, tags: [download_harbor_artifacts] }
+    - { role: configure_harbor_tls, tags: [configure_harbor_tls, tls] }
+    - { role: install_harbor, tags: [install_harbor] }
+    - { role: configure_harbor_projects, tags: [configure_harbor_projects] }
+
+  post_tasks:
+    - name: Open firewall ports for Harbor
+      ansible.builtin.shell:
+        cmd: |
+          if firewall-cmd --permanent --query-port={{ item }}/tcp >/dev/null &&
+             firewall-cmd --query-port={{ item }}/tcp >/dev/null; then
+            echo open
+          else
+            firewall-cmd --permanent --add-port={{ item }}/tcp >/dev/null &&
+            firewall-cmd --add-port={{ item }}/tcp >/dev/null && echo opened
+          fi
+        executable: /bin/bash
+      loop: "{{ firewall_open_tcp_ports }}"
+      register: harbor_firewall
+      changed_when: "'opened' in harbor_firewall.stdout"
+      when: enable_firewall | bool
+      tags: [firewall]
+
+    - name: Verify the registry
+      ansible.builtin.include_role:
+        name: verify_harbor
+        apply:
+          tags: [verify]
+      tags: [verify]

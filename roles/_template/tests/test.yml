@@ -1,0 +1,6 @@
+---
+- name: Smoke-test rolename
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - rolename

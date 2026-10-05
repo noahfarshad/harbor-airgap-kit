@@ -1,0 +1,20 @@
+---
+# inventories/lab/group_vars/all/artifacts.yml
+#
+# Where the lab gets the Harbor files: its own Nexus, which make lab-up starts
+# and sets up. kit publish uploads the files to it, and the roles and dnf read
+# them from there, the same as in a real environment.
+
+nexus_enabled:                true           # the lab proves the Nexus path; false builds from the staged files
+artifact_source:              "{{ 'repo' if nexus_enabled | bool else 'staged' }}"
+
+nexus_url:                    "http://localhost:8081"
+nexus_raw_repo:               vmware-raw     # raw (hosted): installers, manifests, keys
+nexus_yum_repo:               harbor-epel    # yum (hosted), repodata depth 0: podman-compose kits only
+artifact_repo_url:            "{{ nexus_url }}/repository/{{ nexus_raw_repo }}"
+artifact_repo_username:       "{{ vault_repo_username | default('') }}"
+artifact_repo_password:       "{{ vault_repo_password | default('') }}"
+artifact_repo_headers:        {}
+artifact_repo_validate_certs: true
+
+artifact_staged_on:           controller

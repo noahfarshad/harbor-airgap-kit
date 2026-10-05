@@ -1,0 +1,138 @@
+---
+# tasks file for stage_harbor_artifacts: present
+
+- name: Confirm the docker-compose release is set when that provider is used
+  ansible.builtin.assert:
+    that:
+      - stage_harbor_docker_compose_version | length > 0
+    fail_msg: >-
+      Set stage_harbor_docker_compose_version to a v2 release tag (for example v2.x.y)
+      from github.com/docker/compose/releases.
+    quiet: true
+  when:
+    - stage_harbor_runtime == 'podman'
+    - stage_harbor_podman_compose_provider == 'docker-compose'
+
+- name: Create the output directory
+  ansible.builtin.file:
+    path: "{{ stage_harbor_output_dir }}"
+    state: directory
+    mode: "0750"
+
+- name: Download the Harbor offline installer
+  ansible.builtin.get_url:
+    url: "{{ stage_harbor_release_url }}/{{ stage_harbor_installer_file }}"
+    dest: "{{ stage_harbor_output_dir }}/{{ stage_harbor_installer_file }}"
+    mode: "0640"
+
+- name: Download the installer's Sigstore signature
+  ansible.builtin.get_url:
+    url: "{{ stage_harbor_release_url }}/{{ stage_harbor_installer_file }}.sigstore.json"
+    dest: "{{ stage_harbor_output_dir }}/{{ stage_harbor_installer_file }}.sigstore.json"
+    mode: "0640"
+  register: stage_harbor_signature
+  failed_when:
+    - stage_harbor_verify_signature | bool
+    - stage_harbor_signature is failed
+
+- name: Check the installer against Harbor's release signature
+  ansible.builtin.command:
+    argv:
+      - "{{ stage_harbor_cosign_bin }}"
+      - verify-blob
+      - --bundle
+      - "{{ stage_harbor_output_dir }}/{{ stage_harbor_installer_file }}.sigstore.json"
+      - --certificate-oidc-issuer
+      - "{{ stage_harbor_cosign_issuer }}"
+      - --certificate-identity
+      - "{{ stage_harbor_cosign_identity }}"
+      - "{{ stage_harbor_output_dir }}/{{ stage_harbor_installer_file }}"
+  register: stage_harbor_cosign
+  changed_when: false
+  when: stage_harbor_verify_signature | bool
+
+- name: Read the installer checksum
+  ansible.builtin.stat:
+    path: "{{ stage_harbor_output_dir }}/{{ stage_harbor_installer_file }}"
+    checksum_algorithm: sha256
+    get_checksum: true
+  register: stage_harbor_installer
+
+- name: Download podman-compose and python3-dotenv from EPEL
+  ansible.builtin.command:
+    cmd: >-
+      dnf download --repo epel --destdir {{ stage_harbor_output_dir }}/podman
+      {{ stage_harbor_podman_packages | join(' ') }}
+    creates: "{{ stage_harbor_output_dir }}/podman"
+  when:
+    - stage_harbor_runtime == 'podman'
+    - stage_harbor_podman_compose_provider == 'podman-compose'
+    - stage_harbor_podman_rpms | bool
+
+- name: Add the EPEL signing key, for the yum repository the files get uploaded to
+  ansible.builtin.get_url:
+    url: "{{ stage_harbor_epel_key_url }}"
+    dest: "{{ stage_harbor_output_dir }}/RPM-GPG-KEY-EPEL-9"
+    mode: "0644"
+  when:
+    - stage_harbor_runtime == 'podman'
+    - stage_harbor_podman_compose_provider == 'podman-compose'
+    - stage_harbor_podman_rpms | bool
+
+- name: Download the docker-compose binary
+  ansible.builtin.get_url:
+    url: "{{ stage_harbor_docker_compose_url }}"
+    dest: "{{ stage_harbor_output_dir }}/docker-compose-linux-x86_64"
+    mode: "0755"
+  when:
+    - stage_harbor_runtime == 'podman'
+    - stage_harbor_podman_compose_provider == 'docker-compose'
+
+- name: Read the docker-compose checksum
+  ansible.builtin.stat:
+    path: "{{ stage_harbor_output_dir }}/docker-compose-linux-x86_64"
+    checksum_algorithm: sha256
+    get_checksum: true
+  register: stage_harbor_compose_bin
+  when:
+    - stage_harbor_runtime == 'podman'
+    - stage_harbor_podman_compose_provider == 'docker-compose'
+
+- name: Download the Docker Engine and Compose RPMs
+  ansible.builtin.command:
+    cmd: >-
+      dnf download --resolve --alldeps --destdir {{ stage_harbor_output_dir }}/docker
+      {{ stage_harbor_docker_packages | join(' ') }}
+    creates: "{{ stage_harbor_output_dir }}/docker"
+  when:
+    - stage_harbor_runtime == 'docker'
+    - stage_harbor_docker_rpms | bool
+
+- name: Write the manifest as a group_vars file
+  ansible.builtin.template:
+    src: harbor_artifacts.yml.j2
+    dest: "{{ stage_harbor_output_dir }}/harbor_artifacts.yml"
+    mode: "0640"
+
+- name: Write SHA256SUMS for every file
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail &&
+      find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+    chdir: "{{ stage_harbor_output_dir }}"
+    executable: /bin/bash
+  changed_when: true
+
+- name: Push the files to the repository
+  ansible.builtin.include_tasks: push.yml
+  when:
+    - stage_harbor_push | bool
+    - stage_harbor_repo_url | length > 0
+
+- name: Show what to carry across
+  ansible.builtin.debug:
+    msg:
+      - "Kit:      {{ stage_harbor_output_dir }}"
+      - "sha256:   {{ stage_harbor_installer.stat.checksum }}"
+      - "Verify:   sha256sum -c SHA256SUMS, inside the output directory, once it is across"
+      - "Manifest: make pull-harbor ENV=<env> writes harbor_artifacts.yml into inventories/<env>/group_vars/registry/"

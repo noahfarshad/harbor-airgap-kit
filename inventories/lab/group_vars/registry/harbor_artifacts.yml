@@ -1,0 +1,10 @@
+---
+# inventories/lab/group_vars/registry/harbor_artifacts.yml
+#
+# Release manifest. kit publish replaces this file with the one from the
+# transfer. The checksum below is deliberately invalid, so the build stops until
+# real Harbor files have been published.
+
+harbor_version:           "2.15.2"
+harbor_installer_file:    "harbor-offline-installer-v2.15.2.tgz"
+harbor_installer_sha256:  "REPLACE-WITH-SHA256-FROM-STAGING"

@@ -1,0 +1,16 @@
+---
+# tasks file for configure_harbor_tls: absent
+
+- name: Stop certmonger tracking the certificate
+  ansible.builtin.command:
+    cmd: "ipa-getcert stop-tracking -f {{ harbor_tls_cert }}"
+    removes: "{{ harbor_tls_cert }}"
+  when: harbor_tls_mode == 'ipa'
+
+- name: Remove the certificate and key
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ harbor_tls_cert }}"
+    - "{{ harbor_tls_key }}"

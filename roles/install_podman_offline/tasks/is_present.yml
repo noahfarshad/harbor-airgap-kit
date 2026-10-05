@@ -1,0 +1,254 @@
+---
+# tasks file for install_podman_offline: present
+
+- name: Install Podman from the environment repository
+  ansible.builtin.dnf:
+    name: "{{ podman_offline_packages }}"
+    state: present
+
+# Harbor's containers find each other by service name. That needs Podman's
+# netavark network stack with aardvark-dns; the older CNI stack has no DNS here.
+- name: Read Podman's network backend
+  ansible.builtin.command:
+    cmd: "podman info --format {% raw %}'{{ .Host.NetworkBackend }}'{% endraw %}"
+  register: podman_offline_network_backend
+  changed_when: false
+
+- name: Stop unless Podman uses netavark
+  ansible.builtin.assert:
+    that:
+      - podman_offline_network_backend.stdout | trim == 'netavark'
+    fail_msg: >-
+      Podman on this host uses the {{ podman_offline_network_backend.stdout | trim }} network
+      backend. Harbor needs netavark (with aardvark-dns) so its containers resolve each other
+      by name. Set network_backend = "netavark" in /etc/containers/containers.conf. Switching
+      backends needs `podman system reset`, which removes existing containers and images, so
+      agree it with the server owner first.
+    quiet: true
+
+# --- podman-compose ---------------------------------------------------------
+- name: Point the server at the repository that carries podman-compose
+  ansible.builtin.yum_repository:
+    name: "{{ podman_offline_yum_repo_name }}"
+    description: "podman-compose and python3-dotenv, uploaded from a harbor-airgap-kit transfer"
+    baseurl: "{{ podman_offline_yum_repo_url }}"
+    gpgcheck: "{{ podman_offline_yum_gpgkey | length > 0 }}"
+    gpgkey: "{{ podman_offline_yum_gpgkey | default(omit, true) }}"
+    username: "{{ podman_offline_yum_username | default(omit, true) }}"
+    password: "{{ podman_offline_yum_password | default(omit, true) }}"
+    sslverify: true
+    enabled: true
+  no_log: "{{ podman_offline_yum_password | length > 0 }}"
+  when:
+    - podman_offline_compose_provider == 'podman-compose'
+    - podman_offline_compose_source == 'yum'
+    - podman_offline_yum_repo_url | length > 0
+
+- name: Install podman-compose from the environment repository
+  ansible.builtin.dnf:
+    name: podman-compose
+    state: present
+  when:
+    - podman_offline_compose_provider == 'podman-compose'
+    - podman_offline_compose_source == 'yum'
+
+- name: Find the staged podman-compose RPMs on the registry host
+  ansible.builtin.find:
+    paths: "{{ artifact_staging }}/{{ podman_offline_rpm_path }}"
+    patterns: "*.rpm"
+  register: podman_offline_rpms_target
+  when:
+    - podman_offline_compose_provider == 'podman-compose'
+    - podman_offline_compose_source == 'staged'
+    - artifact_staged_on | default('target') == 'target'
+
+- name: Find the staged podman-compose RPMs on the control host
+  ansible.builtin.find:
+    paths: "{{ artifact_staging }}/{{ podman_offline_rpm_path }}"
+    patterns: "*.rpm"
+  register: podman_offline_rpms_controller
+  delegate_to: localhost
+  become: false
+  when:
+    - podman_offline_compose_provider == 'podman-compose'
+    - podman_offline_compose_source == 'staged'
+    - artifact_staged_on | default('target') == 'controller'
+
+- name: Create a landing directory for RPMs copied from the control host
+  ansible.builtin.file:
+    path: "{{ podman_offline_landing_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  when: podman_offline_rpms_controller.files | default([]) | length > 0
+
+- name: Copy the RPMs from the control host
+  ansible.builtin.copy:
+    src: "{{ item.path }}"
+    dest: "{{ podman_offline_landing_dir }}/{{ item.path | basename }}"
+    mode: "0640"
+  loop: "{{ podman_offline_rpms_controller.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+
+- name: Copy the EPEL signing key from the control host
+  ansible.builtin.copy:
+    src: "{{ artifact_staging }}/{{ podman_offline_gpg_key }}"
+    dest: "{{ podman_offline_landing_dir }}/{{ podman_offline_gpg_key | basename }}"
+    mode: "0644"
+  when:
+    - podman_offline_rpms_controller.files | default([]) | length > 0
+    - not (podman_offline_disable_gpg_check | bool)
+
+- name: Build the list of staged RPMs
+  ansible.builtin.set_fact:
+    podman_offline_rpm_files: >-
+      {{ (podman_offline_rpms_target.files | default([]) | map(attribute='path') | list)
+         + (podman_offline_rpms_controller.files | default([])
+            | map(attribute='path') | map('basename')
+            | map('regex_replace', '^', podman_offline_landing_dir ~ '/') | list) }}
+  when:
+    - podman_offline_compose_provider == 'podman-compose'
+    - podman_offline_compose_source == 'staged'
+
+- name: Stop if no staged RPMs were found
+  ansible.builtin.assert:
+    that:
+      - podman_offline_rpm_files | length > 0
+    fail_msg: "No RPMs under {{ artifact_staging }}/{{ podman_offline_rpm_path }} ({{ artifact_staged_on | default('target') }})."
+    quiet: true
+  when:
+    - podman_offline_compose_provider == 'podman-compose'
+    - podman_offline_compose_source == 'staged'
+
+# The transfer carries podman-compose and python3-dotenv; anything else they
+# need comes from the server's own repos. Only packages this host doesn't have
+# yet are installed from the transfer, so installed packages are never upgraded
+# or replaced from it and stay at the environment's own patch level.
+- name: Install only the staged packages this host is missing
+  when:
+    - podman_offline_compose_provider == 'podman-compose'
+    - podman_offline_compose_source == 'staged'
+  block:
+    - name: Read the package name in each staged RPM
+      ansible.builtin.command:
+        argv: "{{ ['rpm', '-qp', '--nosignature', '--nodigest', '--queryformat', '%{NAME}\\n'] + podman_offline_rpm_files }}"
+      register: podman_offline_rpm_names
+      changed_when: false
+
+    - name: Read the installed packages
+      ansible.builtin.package_facts:
+        manager: rpm
+
+    - name: Keep the staged RPMs whose package is not installed
+      ansible.builtin.set_fact:
+        podman_offline_rpm_install: >-
+          {{ podman_offline_rpm_files | zip(podman_offline_rpm_names.stdout_lines)
+             | rejectattr('1', 'in', ansible_facts.packages.keys() | list)
+             | map(attribute='0') | list }}
+
+    - name: Report what comes from the transfer
+      ansible.builtin.debug:
+        msg: >-
+          {{ (podman_offline_rpm_install | map('basename') | list) if podman_offline_rpm_install | length > 0
+             else 'Nothing to install from the transfer: every package is already here' }}
+
+    # dnf checks each staged RPM's signature against the keys rpm knows; the
+    # transfer carries EPEL's, checked against SHA256SUMS on the way in.
+    - name: Import the EPEL signing key from the transfer
+      ansible.builtin.rpm_key:
+        key: >-
+          {{ (podman_offline_landing_dir ~ '/' ~ (podman_offline_gpg_key | basename))
+             if artifact_staged_on | default('target') == 'controller'
+             else (artifact_staging ~ '/' ~ podman_offline_gpg_key) }}
+        state: present
+      when:
+        - podman_offline_rpm_install | length > 0
+        - not (podman_offline_disable_gpg_check | bool)
+
+    - name: Install podman-compose from the staged RPMs
+      ansible.builtin.dnf:
+        name: "{{ podman_offline_rpm_install }}"
+        state: present
+        disable_gpg_check: "{{ podman_offline_disable_gpg_check }}"
+      when: podman_offline_rpm_install | length > 0
+
+# --- docker-compose binary on Podman's socket --------------------------------
+- name: Place the docker-compose binary from storage on the registry host
+  ansible.builtin.copy:
+    src: "{{ artifact_staging }}/{{ podman_offline_docker_compose_file }}"
+    dest: "{{ podman_offline_docker_compose_bin }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - podman_offline_compose_provider == 'docker-compose'
+    - artifact_source | default('staged') == 'staged'
+    - artifact_staged_on | default('target') == 'target'
+
+- name: Place the docker-compose binary from the control host
+  ansible.builtin.copy:
+    src: "{{ artifact_staging }}/{{ podman_offline_docker_compose_file }}"
+    dest: "{{ podman_offline_docker_compose_bin }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - podman_offline_compose_provider == 'docker-compose'
+    - artifact_source | default('staged') == 'staged'
+    - artifact_staged_on | default('target') == 'controller'
+
+- name: Download the docker-compose binary from the environment repository
+  ansible.builtin.get_url:
+    url: "{{ artifact_repo_url }}/{{ podman_offline_docker_compose_file }}"
+    dest: "{{ podman_offline_docker_compose_bin }}"
+    checksum: "{{ ('sha256:' ~ podman_offline_docker_compose_sha256) if podman_offline_docker_compose_sha256 | length > 0 else omit }}"
+    url_username: "{{ artifact_repo_username | default(omit, true) }}"
+    url_password: "{{ artifact_repo_password | default(omit, true) }}"
+    force_basic_auth: "{{ (artifact_repo_username | default('') | length > 0) | bool }}"
+    headers: "{{ artifact_repo_headers | default({}) }}"
+    validate_certs: "{{ artifact_repo_validate_certs | default(true) }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - podman_offline_compose_provider == 'docker-compose'
+    - artifact_source | default('staged') == 'repo'
+
+- name: Read the docker-compose checksum
+  ansible.builtin.stat:
+    path: "{{ podman_offline_docker_compose_bin }}"
+    checksum_algorithm: sha256
+    get_checksum: true
+  register: podman_offline_compose_stat
+  when: podman_offline_compose_provider == 'docker-compose'
+
+- name: Stop if docker-compose does not match the manifest
+  ansible.builtin.assert:
+    that:
+      - podman_offline_compose_stat.stat.checksum == podman_offline_docker_compose_sha256
+    fail_msg: "docker-compose does not match the checksum in harbor_artifacts.yml."
+    quiet: true
+  when:
+    - podman_offline_compose_provider == 'docker-compose'
+    - podman_offline_docker_compose_sha256 | length > 0
+
+- name: Enable the Podman API socket
+  ansible.builtin.systemd:
+    name: podman.socket
+    enabled: true
+    state: started
+  when: podman_offline_compose_provider == 'docker-compose'
+
+# --- check --------------------------------------------------------------------
+- name: Confirm the compose provider runs
+  ansible.builtin.command:
+    cmd: "{{ 'podman-compose version' if podman_offline_compose_provider == 'podman-compose' else podman_offline_docker_compose_bin ~ ' version' }}"
+  register: podman_offline_compose_version
+  changed_when: false
+
+- name: Report the versions in use
+  ansible.builtin.debug:
+    msg: "{{ podman_offline_compose_version.stdout_lines }}"

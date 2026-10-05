@@ -1,0 +1,8 @@
+---
+# tasks file for rolename: absent
+#
+# Undo what is_present.yml put in place. Keep data unless a purge flag says otherwise.
+
+- name: Replace with the first removal task
+  ansible.builtin.debug:
+    msg: "Nothing to remove yet"

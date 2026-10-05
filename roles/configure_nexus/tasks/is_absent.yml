@@ -1,0 +1,45 @@
+---
+# tasks file for configure_nexus: absent
+#
+# Removes the kit's accounts and roles. The repositories and their content stay
+# unless nexus_purge_repositories is true.
+
+- name: Remove the kit's accounts, roles and (on request) repositories
+  module_defaults:
+    ansible.builtin.uri:
+      url_username: "{{ nexus_admin_user }}"
+      url_password: "{{ nexus_admin_password }}"
+      force_basic_auth: true
+      validate_certs: "{{ nexus_validate_certs }}"
+  block:
+    - name: Remove the accounts
+      ansible.builtin.uri:
+        url: "{{ nexus_url }}/service/rest/v1/security/users/{{ item }}"
+        method: DELETE
+        status_code: [204, 404]
+      loop: "{{ configure_nexus_user_ids }}"
+      register: configure_nexus_user_removed
+      changed_when: configure_nexus_user_removed.status == 204
+
+    - name: Remove the roles
+      ansible.builtin.uri:
+        url: "{{ nexus_url }}/service/rest/v1/security/roles/{{ item.id }}"
+        method: DELETE
+        status_code: [204, 404]
+      loop: "{{ configure_nexus_roles }}"
+      loop_control:
+        label: "{{ item.id }}"
+      register: configure_nexus_role_removed
+      changed_when: configure_nexus_role_removed.status == 204
+
+    - name: Remove the repositories and their content
+      ansible.builtin.uri:
+        url: "{{ nexus_url }}/service/rest/v1/repositories/{{ item.body.name }}"
+        method: DELETE
+        status_code: [204, 404]
+      loop: "{{ configure_nexus_repositories }}"
+      loop_control:
+        label: "{{ item.body.name }}"
+      register: configure_nexus_repo_removed
+      changed_when: configure_nexus_repo_removed.status == 204
+      when: nexus_purge_repositories | bool

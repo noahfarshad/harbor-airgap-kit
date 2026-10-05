@@ -1,0 +1,11 @@
+---
+# tasks file for install_harbor: apply changed settings (Podman)
+
+- name: Regenerate the configuration and the Podman compose file
+  ansible.builtin.include_tasks: "{{ role_path }}/tasks/podman_prepare.yml"
+
+- name: Restart Harbor
+  ansible.builtin.systemd:
+    name: harbor
+    state: restarted
+    daemon_reload: true

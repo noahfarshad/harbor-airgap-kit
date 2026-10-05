@@ -1,0 +1,4 @@
+---
+# vars file for rolename
+#
+# Fixed values the role relies on and nobody should override per environment.

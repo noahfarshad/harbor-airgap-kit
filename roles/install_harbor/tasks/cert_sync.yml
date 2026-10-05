@@ -1,0 +1,30 @@
+---
+# tasks file for install_harbor: certificate renewal
+#
+# Harbor's prepare step copies the certificate into data_volume/secret/cert,
+# and nginx serves that copy. When certmonger (or anyone) replaces the
+# certificate, a systemd path unit copies it across the same way and restarts
+# the proxy, so the served certificate never falls behind the renewed one.
+
+- name: Install the certificate sync service
+  ansible.builtin.template:
+    src: harbor-cert-sync.service.j2
+    dest: /etc/systemd/system/harbor-cert-sync.service
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install the certificate watch
+  ansible.builtin.template:
+    src: harbor-cert-sync.path.j2
+    dest: /etc/systemd/system/harbor-cert-sync.path
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Watch the certificate for changes
+  ansible.builtin.systemd:
+    name: harbor-cert-sync.path
+    enabled: true
+    state: started
+    daemon_reload: true

@@ -1,0 +1,8 @@
+---
+# tasks file for rolename: present
+#
+# Idempotent: a second run reports no changes.
+
+- name: Replace with the first real task
+  ansible.builtin.debug:
+    msg: "rolename_example is {{ rolename_example }}"

@@ -1,0 +1,37 @@
+---
+# remove_registry.yml
+#
+# Takes Harbor off a registry host: stops it, removes its systemd units, the
+# generated compose files and the installer, and the certificate it was issued.
+# Keeps harbor.yml, the data volume and the container runtime, so the same host
+# can be built again (on the other runtime, for example) with
+# make build-registry once this has run.
+#
+# Usage:
+#   make remove-registry ENV=<env>
+#   make remove-registry ENV=<env> ARGS="--skip-tags tls"   # keep the certificate
+#
+# The data under harbor_data_volume is NOT deleted unless harbor_purge_data is
+# set to true. Set it only when the registry content is no longer needed.
+
+- name: Remove the Harbor container registry
+  hosts: registry
+  gather_facts: true
+  become: true
+  vars:
+    desired_state: absent
+
+  pre_tasks:
+    - name: Confirm the host is a RedHat-family member of [registry]
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] == 'RedHat'
+          - inventory_hostname in groups['registry']
+        fail_msg: "Host must be a RedHat-family member of [registry]"
+
+  # Reverse order of build_registry.yml. The runtime roles are left out on
+  # purpose: removing Harbor does not remove Podman or Docker.
+  roles:
+    - { role: install_harbor, tags: [install_harbor] }
+    - { role: configure_harbor_tls, tags: [configure_harbor_tls, tls] }
+    - { role: download_harbor_artifacts, tags: [download_harbor_artifacts] }

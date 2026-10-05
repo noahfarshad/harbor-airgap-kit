@@ -1,0 +1,13 @@
+---
+# group_vars/registry/harbor_artifacts.yml
+#
+# Written by stage_harbor_artifacts on the connected side. make pull-harbor
+# copies it into inventories/<env>/group_vars/registry/. The roles check the
+# Harbor files against these checksums once they land on the host.
+
+harbor_version:           "{{ stage_harbor_version }}"
+harbor_installer_file:    "{{ stage_harbor_installer_file }}"
+harbor_installer_sha256:  "{{ stage_harbor_installer.stat.checksum }}"
+{% if stage_harbor_compose_bin.stat is defined %}
+podman_offline_docker_compose_sha256: "{{ stage_harbor_compose_bin.stat.checksum }}"
+{% endif %}

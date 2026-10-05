@@ -1,0 +1,88 @@
+---
+# tasks file for install_harbor: Podman on RHEL 9
+#
+# Harbor's installer only knows Docker, so the same steps run with Podman:
+# load the images, run Harbor's own prepare container, adapt the compose file it
+# generates (Podman has no syslog log driver), and run it under systemd.
+
+- name: Keep container labels on Harbor's paths
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      spec='{{ item }}(/.*)?'
+      now=$(semanage fcontext -l -C | awk -v s="$spec" '$1 == s { print $NF }')
+      case "$now" in
+        *:container_file_t:*) echo present ;;
+        "") semanage fcontext -a -t container_file_t "$spec" && echo added ;;
+        *) semanage fcontext -m -t container_file_t "$spec" && echo added ;;
+      esac
+    executable: /bin/bash
+  register: harbor_sefcontext
+  changed_when: "'added' in harbor_sefcontext.stdout"
+  loop:
+    - "{{ harbor_data_volume }}"
+    - "{{ harbor_install_dir }}/common"
+  when:
+    - harbor_manage_selinux | bool
+    - ansible_facts.selinux.status | default('disabled') == 'enabled'
+
+- name: Check whether this release's images are loaded
+  ansible.builtin.command:
+    cmd: "podman image exists goharbor/harbor-core:v{{ harbor_version }}"
+  register: harbor_images_present
+  changed_when: false
+  failed_when: harbor_images_present.rc not in [0, 1]
+
+- name: Load the Harbor images
+  ansible.builtin.command:
+    cmd: "podman load -i {{ harbor_install_dir }}/harbor.v{{ harbor_version }}.tar.gz"
+  when: harbor_images_present.rc == 1
+  changed_when: true
+
+- name: Check for the Podman compose file
+  ansible.builtin.stat:
+    path: "{{ harbor_install_dir }}/podman-compose.yml"
+  register: harbor_podman_compose
+
+- name: Generate the configuration and the Podman compose file
+  ansible.builtin.include_tasks: podman_prepare.yml
+  when: not harbor_podman_compose.stat.exists
+
+- name: Install the systemd unit
+  ansible.builtin.template:
+    src: harbor.service.j2
+    dest: /etc/systemd/system/harbor.service
+    owner: root
+    group: root
+    mode: "0644"
+
+# A firewalld reload drops the port forwarding Podman sets up for Harbor, so
+# 80/443 stop answering from other hosts until Harbor restarts. netavark ships
+# a service that puts the rules back after every reload.
+- name: Check for netavark's firewalld reload service
+  ansible.builtin.stat:
+    path: /usr/lib/systemd/system/netavark-firewalld-reload.service
+  register: harbor_netavark_reload
+
+- name: Restore Harbor's port forwarding after firewalld reloads
+  ansible.builtin.systemd:
+    name: netavark-firewalld-reload.service
+    enabled: true
+    state: started
+  when:
+    - harbor_netavark_reload.stat.exists
+    - enable_firewall | default(false) | bool
+
+- name: Enable the Podman API socket for the docker-compose provider
+  ansible.builtin.systemd:
+    name: podman.socket
+    enabled: true
+    state: started
+  when: harbor_podman_compose_provider == 'docker-compose'
+
+- name: Start Harbor and enable it at boot
+  ansible.builtin.systemd:
+    name: harbor
+    enabled: true
+    state: started
+    daemon_reload: true

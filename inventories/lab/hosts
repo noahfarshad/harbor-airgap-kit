@@ -1,0 +1,9 @@
+# inventories/lab/hosts
+#
+# The lab: one machine plays every part. It's the connected workstation, the
+# Ansible control host, the Nexus server and the registry server, so Ansible runs
+# against itself. On Windows that machine is the harbor-lab WSL distribution
+# (docs/LAB.md); a RHEL 9-family VM works the same way.
+
+[registry]
+lab-registry

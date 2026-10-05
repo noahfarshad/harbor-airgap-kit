@@ -1,0 +1,16 @@
+---
+galaxy_info:
+  role_name: configure_harbor_tls
+  author: Noah Farshad
+  description: "Put the Harbor certificate in place, either requested from IdM with certmonger tracking or copied from attached storage."
+  license: GPL-3.0-only
+  min_ansible_version: "2.16"
+  platforms:
+    - name: EL
+      versions:
+        - "9"
+  galaxy_tags:
+    - harbor
+    - tls
+    - ipa
+dependencies: []

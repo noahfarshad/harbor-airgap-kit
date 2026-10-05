@@ -1,0 +1,10 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Watch Harbor's certificate for renewal
+
+[Path]
+PathChanged={{ harbor_tls_cert }}
+Unit=harbor-cert-sync.service
+
+[Install]
+WantedBy=multi-user.target

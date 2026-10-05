@@ -1,0 +1,13 @@
+---
+# inventories/lab/group_vars/all/vault.yml.example
+#
+# make lab-up writes vault.yml from this shape with random passwords, and
+# encrypts it with .vault_pass. To see them: make lab-info.
+
+vault_harbor_admin_password:  "REPLACE-WITH-HARBOR-ADMIN-PASSWORD"
+vault_harbor_db_password:     "REPLACE-WITH-HARBOR-DATABASE-PASSWORD"
+vault_repo_username:          "kit-read"
+vault_repo_password:          "REPLACE-WITH-NEXUS-READ-PASSWORD"
+vault_nexus_admin_password:   "REPLACE-WITH-NEXUS-ADMIN-PASSWORD"
+vault_nexus_upload_user:      "kit-upload"
+vault_nexus_upload_password:  "REPLACE-WITH-NEXUS-UPLOAD-PASSWORD"

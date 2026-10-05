@@ -1,0 +1,12 @@
+---
+# tasks file for lab_nexus
+#
+# 4-state dispatcher: desired_state present | absent (started / stopped reserved)
+
+- name: Converge to present
+  ansible.builtin.include_tasks: is_present.yml
+  when: desired_state | default('present') == 'present'
+
+- name: Converge to absent
+  ansible.builtin.include_tasks: is_absent.yml
+  when: desired_state | default('present') == 'absent'

@@ -1,0 +1,14 @@
+---
+# tasks file for install_docker_offline: absent
+
+- name: Stop and disable Docker
+  ansible.builtin.systemd:
+    name: docker
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: Remove Docker Engine and Compose
+  ansible.builtin.dnf:
+    name: "{{ docker_offline_packages }}"
+    state: absent

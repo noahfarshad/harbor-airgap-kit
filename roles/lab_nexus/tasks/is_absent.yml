@@ -1,0 +1,29 @@
+---
+# tasks file for lab_nexus: absent
+#
+# Stops Nexus and removes its unit. Its data stays in the volume unless
+# lab_nexus_purge_data is true.
+
+- name: Check for the Nexus unit
+  ansible.builtin.stat:
+    path: "/etc/containers/systemd/{{ lab_nexus_name }}.container"
+  register: lab_nexus_unit_file
+
+- name: Stop Nexus
+  ansible.builtin.systemd_service:
+    name: "{{ lab_nexus_name }}.service"
+    state: stopped
+  when: lab_nexus_unit_file.stat.exists
+
+- name: Remove the Nexus unit
+  ansible.builtin.file:
+    path: "/etc/containers/systemd/{{ lab_nexus_name }}.container"
+    state: absent
+  notify: Reload systemd for the Nexus unit
+
+- name: Delete the Nexus data volume
+  ansible.builtin.command:
+    cmd: "podman volume rm --force {{ lab_nexus_volume }}"
+  register: lab_nexus_volume_removed
+  changed_when: lab_nexus_volume_removed.stdout | length > 0
+  when: lab_nexus_purge_data | bool

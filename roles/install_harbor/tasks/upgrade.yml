@@ -1,0 +1,61 @@
+---
+# tasks file for install_harbor: in-place upgrade
+#
+# Follows Harbor's documented upgrade: stop, keep a copy of the database, unpack
+# the new release, migrate harbor.yml with the new prepare image. The normal
+# install tasks then deploy the new release. Check Harbor's release notes for
+# the supported version jump before staging a new release.
+
+- name: Stop Harbor before the upgrade (Docker)
+  ansible.builtin.command:
+    cmd: docker compose down
+    chdir: "{{ harbor_install_dir }}"
+  when: harbor_container_runtime == 'docker'
+  changed_when: true
+
+- name: Stop Harbor before the upgrade (Podman)
+  ansible.builtin.systemd:
+    name: harbor
+    state: stopped
+  when: harbor_container_runtime == 'podman'
+
+- name: Keep a copy of the database files
+  ansible.builtin.command:
+    cmd: "cp -a {{ harbor_data_volume }}/database {{ harbor_data_volume }}/database-before-{{ harbor_version }}"
+    creates: "{{ harbor_data_volume }}/database-before-{{ harbor_version }}"
+  when: harbor_upgrade_backup_db | bool
+
+- name: Move the previous release aside
+  ansible.builtin.command:
+    cmd: "mv {{ harbor_install_dir }} {{ harbor_install_dir }}-{{ harbor_installed_version }}"
+    creates: "{{ harbor_install_dir }}-{{ harbor_installed_version }}"
+
+- name: Unpack the new release
+  ansible.builtin.unarchive:
+    src: "{{ harbor_download_dir }}/{{ harbor_installer_file }}"
+    dest: "{{ harbor_install_parent }}"
+    remote_src: true
+    creates: "{{ harbor_install_dir }}/install.sh"
+    owner: root
+    group: root
+
+- name: Carry the existing harbor.yml forward
+  ansible.builtin.copy:
+    src: "{{ harbor_install_dir }}-{{ harbor_installed_version }}/harbor.yml"
+    dest: "{{ harbor_install_dir }}/harbor.yml"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Load the new release images
+  ansible.builtin.command:
+    cmd: "{{ harbor_container_runtime }} load -i {{ harbor_install_dir }}/harbor.v{{ harbor_version }}.tar.gz"
+  changed_when: true
+
+- name: Migrate harbor.yml to the new release format
+  ansible.builtin.command:
+    cmd: >-
+      {{ harbor_container_runtime }} run --rm --privileged -v /:/hostfs
+      goharbor/prepare:v{{ harbor_version }} migrate -i {{ harbor_install_dir }}/harbor.yml
+  changed_when: true

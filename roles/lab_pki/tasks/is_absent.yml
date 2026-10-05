@@ -1,0 +1,21 @@
+---
+# tasks file for lab_pki: absent
+
+- name: Stop trusting the lab CA
+  ansible.builtin.file:
+    path: "{{ lab_pki_trust_anchor }}"
+    state: absent
+  notify: Rebuild the system trust store
+
+- name: Remove the lab names from /etc/hosts
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^\S+\s+{{ item | regex_escape }}(\s|$)'
+    state: absent
+    unsafe_writes: true
+  loop: "{{ lab_pki_names }}"
+
+- name: Delete the lab CA and certificates
+  ansible.builtin.file:
+    path: "{{ lab_pki_dir }}"
+    state: absent

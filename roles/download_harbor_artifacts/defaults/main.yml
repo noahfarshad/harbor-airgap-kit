@@ -1,0 +1,20 @@
+---
+# defaults file for download_harbor_artifacts
+#
+# Environment-wide inputs come from group_vars/all (see artifacts.yml):
+#   artifact_source            repo | staged
+#   artifact_repo_url          Nexus raw / Artifactory generic base URL
+#   artifact_repo_username     from vault_repo_username
+#   artifact_repo_password     from vault_repo_password
+#   artifact_repo_headers      token headers, if any
+#   artifact_repo_validate_certs
+#   artifact_staging           attached-storage mount point
+#   artifact_staged_on         target | controller
+#
+# Release inputs come from group_vars/registry/harbor_artifacts.yml (REQUIRED):
+# harbor_version: ""
+# harbor_installer_file: ""
+# harbor_installer_sha256: ""
+
+harbor_artifact_path: harbor                       # sub-path under the repo URL or staging mount
+harbor_download_dir: "{{ stage_root | default('/var/staging') }}/harbor"

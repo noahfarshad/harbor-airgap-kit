@@ -1,0 +1,9 @@
+---
+# inventories/lab/host_vars/lab-registry.yml
+#
+# The lab machine. Ansible runs on it, against itself.
+
+ansible_connection:     local
+registry_server_fqdn:   localhost
+harbor_hostname:        harbor.lab.internal      # resolves to this machine through /etc/hosts (make lab-up)
+harbor_data_volume:     /data                    # a directory here; harbor_data_require_mount is off in the lab

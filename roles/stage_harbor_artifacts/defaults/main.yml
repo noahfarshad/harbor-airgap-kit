@@ -1,0 +1,60 @@
+---
+# defaults file for stage_harbor_artifacts
+#
+# Runs on the CONNECTED side only. Everything this role produces is carried into
+# the air-gapped environments, by scp, transfer media or a repository push.
+#
+# Run it on a RHEL 9 host at the same minor release as the registry
+# hosts, so the RPMs it downloads match what they have installed.
+
+stage_harbor_version: "2.15.2"
+stage_harbor_installer_file: "harbor-offline-installer-v{{ stage_harbor_version }}.tgz"
+stage_harbor_release_url: "https://github.com/goharbor/harbor/releases/download/v{{ stage_harbor_version }}"
+
+# Check the installer against Harbor's release signature before anything else
+# happens. Harbor 2.15 and later are signed keylessly with Sigstore by their release
+# workflow; cosign verifies the .sigstore.json bundle that ships with each release.
+stage_harbor_verify_signature: true
+stage_harbor_cosign_bin: cosign
+stage_harbor_cosign_issuer: https://token.actions.githubusercontent.com
+stage_harbor_cosign_identity: >-
+  https://github.com/goharbor/harbor/.github/workflows/publish_release.yml@refs/tags/v{{ stage_harbor_version }}
+
+# Where the files are put together on the connected host
+stage_harbor_output_dir: "{{ playbook_dir }}/artifacts/harbor"
+
+# Runtime the files are for
+stage_harbor_runtime: podman                       # podman | docker
+stage_harbor_podman_compose_provider: podman-compose   # podman-compose | docker-compose
+
+# podman-compose and python3-dotenv, its one dependency outside RHEL, from
+# EPEL (EPEL enabled on this host). Everything else they need comes from each
+# environment's own RHEL repositories.
+stage_harbor_podman_rpms: true
+stage_harbor_podman_packages:
+  - podman-compose
+  - python3-dotenv
+stage_harbor_epel_key_url: https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9
+
+# docker-compose static binary, for the docker-compose provider
+stage_harbor_docker_compose_version: ""            # a v2 release tag from github.com/docker/compose/releases
+stage_harbor_docker_compose_url: >-
+  https://github.com/docker/compose/releases/download/{{ stage_harbor_docker_compose_version }}/docker-compose-linux-x86_64
+
+# Docker Engine RPMs, for the docker runtime without a docker yum mirror
+stage_harbor_docker_rpms: false
+stage_harbor_docker_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+
+# Optional push to a repository (Nexus raw hosted / Artifactory generic)
+stage_harbor_push: false
+stage_harbor_repo_url: ""
+stage_harbor_repo_path: "harbor"
+stage_harbor_repo_username: ""
+stage_harbor_repo_password: ""
+stage_harbor_repo_headers: {}        # e.g. {"Authorization": "Bearer {{ vault_artifactory_token }}"}
+stage_harbor_repo_validate_certs: true

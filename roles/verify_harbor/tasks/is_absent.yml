@@ -1,0 +1,8 @@
+---
+# tasks file for verify_harbor: absent
+#
+# Verification has no absent state.
+
+- name: Nothing to remove
+  ansible.builtin.debug:
+    msg: "verify_harbor is read-only; desired_state absent does nothing."

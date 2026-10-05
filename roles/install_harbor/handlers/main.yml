@@ -1,0 +1,9 @@
+---
+# handlers file for install_harbor
+#
+# Only fires when harbor.yml changes on an existing deployment; a first install
+# already runs with the new values.
+
+- name: Reinstall harbor
+  ansible.builtin.include_tasks: "{{ role_path }}/tasks/reinstall_{{ harbor_container_runtime }}.yml"
+  when: harbor_already_deployed | default(false) | bool

@@ -1,0 +1,24 @@
+---
+# tasks file for stage_harbor_artifacts: push every file to a repository
+
+- name: Find every file to push
+  ansible.builtin.find:
+    paths: "{{ stage_harbor_output_dir }}"
+    recurse: true
+  register: stage_harbor_found_files
+
+- name: Push the files, keeping their relative paths
+  ansible.builtin.uri:
+    url: "{{ stage_harbor_repo_url }}/{{ stage_harbor_repo_path }}/{{ item.path | relpath(stage_harbor_output_dir) }}"
+    method: PUT
+    src: "{{ item.path }}"
+    remote_src: true
+    force_basic_auth: "{{ (stage_harbor_repo_username | length > 0) | bool }}"
+    url_username: "{{ stage_harbor_repo_username | default(omit, true) }}"
+    url_password: "{{ stage_harbor_repo_password | default(omit, true) }}"
+    headers: "{{ stage_harbor_repo_headers }}"
+    validate_certs: "{{ stage_harbor_repo_validate_certs }}"
+    status_code: [200, 201, 204]
+  loop: "{{ stage_harbor_found_files.files }}"
+  loop_control:
+    label: "{{ item.path | relpath(stage_harbor_output_dir) }}"

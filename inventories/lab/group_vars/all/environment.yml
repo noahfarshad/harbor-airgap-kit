@@ -1,0 +1,8 @@
+---
+# inventories/lab/group_vars/all/environment.yml
+#
+# Facts about the environment, kept in one place. The lab has no vCenter,
+# Supervisor or IdM; a real environment's inventory records those here.
+
+env_name:     lab
+domain:       lab.internal

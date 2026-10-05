@@ -1,0 +1,27 @@
+---
+# defaults file for verify_harbor
+
+harbor_container_runtime: podman
+harbor_api_url: "https://{{ harbor_hostname }}:{{ harbor_https_port | default(443) }}/api/v2.0"
+harbor_api_validate_certs: true
+harbor_install_dir: "{{ install_root | default('/opt') }}/harbor"
+harbor_verify_cert_warn_days: 30
+broadcom_items: {}                    # set in group_vars/registry/broadcom.yml
+harbor_catalog_file: "{{ playbook_dir }}/broadcom/catalog.yml"
+# The projects this environment's Broadcom items go to (broadcom/catalog.yml), beyond harbor_projects
+harbor_item_projects: >-
+  {{ (broadcom_items | dict2items | selectattr('value') | map(attribute='key')
+      | map('extract', lookup('ansible.builtin.file', harbor_catalog_file) | from_yaml)
+      | map(attribute='project') | unique | list)
+     | difference(harbor_projects | default([]) | map(attribute='name') | list) }}
+harbor_tls_cert: "/etc/pki/tls/certs/{{ harbor_hostname }}.crt"   # normally set in group_vars/registry
+# Container names Harbor's compose file gives its core services
+harbor_verify_expected_containers:
+  - nginx
+  - harbor-core
+  - harbor-portal
+  - harbor-jobservice
+  - harbor-db
+  - registry
+  - registryctl
+  - redis

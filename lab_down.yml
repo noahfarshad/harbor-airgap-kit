@@ -1,0 +1,28 @@
+---
+# lab_down.yml
+#
+# Takes the lab's infrastructure away. Run make remove-registry ENV=lab first to
+# take Harbor off. Nexus's data stays unless lab_nexus_purge_data=true, which is
+# what make lab-destroy passes, along with removing the lab CA.
+#
+# Usage:
+#   make lab-down                   # stop Nexus, keep its data
+#   make lab-destroy                # everything: Harbor's data, Nexus's data, the CA
+
+- name: Take the lab's infrastructure away
+  hosts: registry
+  gather_facts: false
+  become: true
+  vars:
+    desired_state: absent
+    lab_pki_remove: false
+
+  tasks:
+    - name: Stop Nexus
+      ansible.builtin.include_role:
+        name: lab_nexus
+
+    - name: Remove the lab CA and names
+      ansible.builtin.include_role:
+        name: lab_pki
+      when: lab_pki_remove | bool

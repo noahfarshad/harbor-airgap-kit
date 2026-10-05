@@ -1,0 +1,115 @@
+---
+# tasks file for install_harbor: absent
+
+- name: Stop and disable the systemd unit
+  ansible.builtin.systemd:
+    name: harbor
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: Read the runtime Harbor was installed on
+  ansible.builtin.slurp:
+    src: "{{ harbor_runtime_marker }}"
+  register: harbor_runtime_file
+  failed_when: false
+
+- name: Use the installed runtime for removal
+  ansible.builtin.set_fact:
+    harbor_remove_runtime: >-
+      {{ (harbor_runtime_file.content | b64decode | trim)
+         if harbor_runtime_file.content is defined else harbor_container_runtime }}
+
+- name: Check for the compose files
+  ansible.builtin.stat:
+    path: "{{ harbor_install_dir }}/{{ item }}"
+  loop:
+    - docker-compose.yml
+    - podman-compose.yml
+  register: harbor_compose_files
+
+- name: Bring the Harbor services down (Docker)
+  ansible.builtin.command:
+    cmd: docker compose down
+    chdir: "{{ harbor_install_dir }}"
+  when:
+    - harbor_remove_runtime == 'docker'
+    - harbor_compose_files.results[0].stat.exists
+  changed_when: true
+
+- name: Bring the Harbor services down (Podman)
+  ansible.builtin.command:
+    cmd: "{{ harbor_podman_compose_bin }} -p {{ harbor_compose_project }} -f podman-compose.yml down"
+    chdir: "{{ harbor_install_dir }}"
+  environment:
+    DOCKER_HOST: "unix://{{ harbor_podman_socket }}"
+  when:
+    - harbor_remove_runtime == 'podman'
+    - harbor_compose_files.results[1].stat.exists
+  changed_when: true
+
+- name: Stop watching the certificate
+  ansible.builtin.systemd:
+    name: harbor-cert-sync.path
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: Remove the systemd units
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item }}"
+    state: absent
+  loop:
+    - harbor.service
+    - harbor-cert-sync.path
+    - harbor-cert-sync.service
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+# harbor.yml and the data stay. The generated files go, so the next deploy (on
+# either runtime) regenerates its configuration and reloads its images.
+- name: Remove generated deployment state
+  ansible.builtin.file:
+    path: "{{ harbor_install_dir }}/{{ item }}"
+    state: absent
+  loop:
+    - docker-compose.yml
+    - podman-compose.yml
+    - .installed_version
+    - .installed_runtime
+
+- name: Remove the install directory
+  ansible.builtin.file:
+    path: "{{ harbor_install_dir }}"
+    state: absent
+  when: harbor_purge_install | bool
+
+# The data volume is usually its own disk mounted at harbor_data_volume, so it is
+# emptied rather than removed: removing a mount point fails, and the mount stays.
+- name: Purge the registry data
+  when: harbor_purge_data | bool
+  block:
+    - name: Refuse to empty a system directory
+      ansible.builtin.assert:
+        that:
+          - harbor_data_volume is match('^/[^/]+')
+          - harbor_data_volume | regex_replace('/+$', '') not in ['/etc', '/usr', '/var', '/home', '/root', '/opt', '/boot', '/tmp']
+        fail_msg: "harbor_data_volume is {{ harbor_data_volume }}: not a path this role will empty"
+        quiet: true
+
+    - name: List the registry data
+      ansible.builtin.find:
+        paths: "{{ harbor_data_volume }}"
+        file_type: any
+        hidden: true
+      register: harbor_data_entries
+
+    - name: Remove the registry data
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ harbor_data_entries.files }}"
+      loop_control:
+        label: "{{ item.path }}"

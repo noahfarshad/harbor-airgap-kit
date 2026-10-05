@@ -1,0 +1,60 @@
+---
+# tasks file for lab_nexus: present
+
+- name: Check for the Nexus image
+  ansible.builtin.command:
+    cmd: "podman image exists {{ lab_nexus_image }}"
+  register: lab_nexus_image_state
+  failed_when: lab_nexus_image_state.rc not in [0, 1]
+  changed_when: false
+
+- name: Pull the Nexus image
+  ansible.builtin.command:
+    cmd: "podman pull {{ lab_nexus_image }}"
+  register: lab_nexus_pull
+  retries: 3
+  delay: 30
+  until: lab_nexus_pull.rc == 0
+  changed_when: true
+  when: lab_nexus_image_state.rc == 1
+
+- name: Write the Nexus unit
+  ansible.builtin.template:
+    src: nexus.container.j2
+    dest: "/etc/containers/systemd/{{ lab_nexus_name }}.container"
+    owner: root
+    group: root
+    mode: "0644"
+  register: lab_nexus_unit
+
+# Quadlet turns the unit into nexus.service on a daemon reload, so a changed
+# unit is reloaded and Nexus restarted in one step.
+- name: Start Nexus
+  ansible.builtin.systemd_service:
+    name: "{{ lab_nexus_name }}.service"
+    state: "{{ 'restarted' if lab_nexus_unit.changed else 'started' }}"
+    daemon_reload: "{{ lab_nexus_unit.changed }}"
+
+- name: Wait for Nexus to accept writes (a first start takes a few minutes)
+  ansible.builtin.uri:
+    url: "http://localhost:{{ lab_nexus_port }}/service/rest/v1/status/writable"
+    status_code: 200
+  register: lab_nexus_ready
+  retries: "{{ lab_nexus_start_retries }}"
+  delay: "{{ lab_nexus_start_delay }}"
+  until: lab_nexus_ready.status == 200
+  changed_when: false
+
+- name: Read the generated admin password (there is one only until it is replaced)
+  ansible.builtin.command:
+    cmd: "podman exec {{ lab_nexus_name }} cat /nexus-data/admin.password"
+  register: lab_nexus_initial_password
+  failed_when: false
+  changed_when: false
+  no_log: true
+
+- name: Hand the generated admin password to configure_nexus
+  ansible.builtin.set_fact:
+    nexus_admin_initial_password: >-
+      {{ lab_nexus_initial_password.stdout | trim if lab_nexus_initial_password.rc == 0 else '' }}
+  no_log: true

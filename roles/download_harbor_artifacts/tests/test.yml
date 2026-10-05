@@ -1,0 +1,6 @@
+---
+- name: Smoke-test download_harbor_artifacts
+  hosts: localhost
+  remote_user: root
+  roles:
+    - download_harbor_artifacts

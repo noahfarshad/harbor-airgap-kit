@@ -1,0 +1,117 @@
+---
+# inventories/lab/group_vars/registry/main.yml
+#
+# Every Harbor setting for the lab. The roles and playbooks are the same ones a
+# real environment uses. The lab only differs where this file says so: the
+# certificate comes from the lab CA instead of IdM, there's no separate data
+# disk, and SELinux is only handled where the kernel has it (not under WSL).
+
+# =============================================================================
+# Container runtime: harbor_container_runtime is lab state, in runtime.yml next
+# door (lab/runtime.sh): podman until make lab-demo RUNTIME=docker
+# =============================================================================
+harbor_podman_compose_provider:  docker-compose    # matches kits/lab.yml: docker-compose | podman-compose
+harbor_podman_socket:            /run/podman/podman.sock
+harbor_podman_log_driver:        journald
+harbor_compose_project:          harbor
+
+podman_offline_packages:
+  - podman
+  - container-selinux
+  - policycoreutils-python-utils
+  - netavark
+  - aardvark-dns
+podman_offline_compose_source:      "{{ 'yum' if nexus_enabled | bool else 'staged' }}"   # podman-compose only
+podman_offline_yum_repo_url:        "{{ nexus_url }}/repository/{{ nexus_yum_repo }}/"
+podman_offline_yum_gpgkey:          "{{ artifact_repo_url }}/{{ harbor_artifact_path }}/RPM-GPG-KEY-EPEL-9"
+podman_offline_yum_username:        "{{ artifact_repo_username }}"
+podman_offline_yum_password:        "{{ artifact_repo_password }}"
+podman_offline_rpm_path:            "{{ harbor_artifact_path }}/podman"
+podman_offline_landing_dir:         "{{ stage_root }}/podman-rpms"
+podman_offline_disable_gpg_check:   false
+podman_offline_docker_compose_file: "{{ harbor_artifact_path }}/docker-compose-linux-x86_64"
+podman_offline_docker_compose_bin:  /usr/local/bin/docker-compose
+
+# --- Docker: read only when harbor_container_runtime: docker ------------------
+docker_offline_source:             staged          # the lab's transfer carries Docker CE (kits/lab.yml docker_ce)
+docker_offline_rpm_path:           "{{ harbor_artifact_path }}/docker"
+docker_offline_landing_dir:        "{{ stage_root }}/docker-rpms"
+docker_offline_allowerasing:       true
+docker_offline_disable_gpg_check:  false
+docker_offline_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+
+# =============================================================================
+# Kit and layout on the registry server
+# =============================================================================
+harbor_artifact_path:       harbor
+harbor_download_dir:        "{{ stage_root }}/harbor"
+harbor_install_parent:      "{{ install_root }}"
+harbor_install_dir:         "{{ harbor_install_parent }}/harbor"
+harbor_data_require_mount:  false                  # the lab has no separate data disk
+harbor_http_port:           80
+harbor_https_port:          443
+harbor_with_trivy:          false
+harbor_manage_systemd:      true
+harbor_manage_selinux:      "{{ ((ansible_facts['selinux'] | default({})).status | default('disabled')) == 'enabled' }}"   # off under WSL
+harbor_cert_sync:           false                  # no certmonger in the lab
+harbor_upgrade_backup_db:   true
+
+harbor_purge_install:       false
+harbor_purge_data:          false
+
+# =============================================================================
+# Credentials: the values are in group_vars/all/vault.yml
+# =============================================================================
+harbor_admin_password:      "{{ vault_harbor_admin_password }}"
+harbor_db_password:         "{{ vault_harbor_db_password }}"
+
+# =============================================================================
+# Projects: the layout the Supervisor and VKS pull from
+# =============================================================================
+harbor_projects:
+  - name: library                                  # created by Harbor
+    public: true
+  - name: sup-services                             # Supervisor Service bundles
+    public: true
+  - name: tanzu-packages                           # VKS standard packages repository
+    public: true
+  - name: tkg                                      # VKS package images
+    public: true
+
+# =============================================================================
+# Certificate: from the lab CA (make lab-up), handed over as a staged pair
+# =============================================================================
+harbor_tls_mode:              staged
+harbor_tls_cert:              "/etc/pki/tls/certs/{{ harbor_hostname }}.crt"
+harbor_tls_key:               "/etc/pki/tls/private/{{ harbor_hostname }}.key"
+harbor_tls_staged_cert:       "/etc/harbor-lab/pki/{{ harbor_hostname }}.crt"
+harbor_tls_staged_key:        "/etc/harbor-lab/pki/{{ harbor_hostname }}.key"
+harbor_tls_staged_ca:         /etc/harbor-lab/pki/ca.crt
+
+# =============================================================================
+# API checks and verification
+# =============================================================================
+harbor_api_url:               "https://{{ harbor_hostname }}:{{ harbor_https_port }}/api/v2.0"
+harbor_api_validate_certs:    true                 # the lab CA is trusted system-wide
+harbor_api_wait_retries:      60
+harbor_api_wait_delay:        10
+harbor_verify_cert_warn_days: 30
+harbor_verify_expected_containers:
+  - nginx
+  - harbor-core
+  - harbor-portal
+  - harbor-jobservice
+  - harbor-db
+  - registry
+  - registryctl
+  - redis
+
+firewall_open_tcp_ports:
+  - 22
+  - "{{ harbor_http_port }}"
+  - "{{ harbor_https_port }}"

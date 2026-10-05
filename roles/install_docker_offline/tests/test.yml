@@ -1,0 +1,6 @@
+---
+- name: Smoke-test install_docker_offline
+  hosts: localhost
+  remote_user: root
+  roles:
+    - install_docker_offline

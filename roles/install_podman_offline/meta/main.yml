@@ -1,0 +1,16 @@
+---
+galaxy_info:
+  role_name: install_podman_offline
+  author: Noah Farshad
+  description: "Install Podman and a compose provider on RHEL 9 with no internet access."
+  license: GPL-3.0-only
+  min_ansible_version: "2.16"
+  platforms:
+    - name: EL
+      versions:
+        - "9"
+  galaxy_tags:
+    - podman
+    - airgap
+    - rhel
+dependencies: []

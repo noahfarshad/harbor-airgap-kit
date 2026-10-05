@@ -1,0 +1,39 @@
+---
+# defaults file for install_harbor
+#
+# REQUIRED inputs, normally from group_vars/registry and vault:
+# harbor_hostname: ""
+# harbor_admin_password: "{{ vault_harbor_admin_password }}"
+# harbor_db_password: "{{ vault_harbor_db_password }}"
+# harbor_version: ""                   # from harbor_artifacts.yml
+# harbor_installer_file: ""            # from harbor_artifacts.yml
+
+# --- runtime ---------------------------------------------------------------
+harbor_container_runtime: podman                  # podman | docker
+harbor_podman_compose_provider: podman-compose    # podman-compose | docker-compose
+harbor_podman_compose_bin: >-
+  {{ '/usr/bin/podman-compose' if harbor_podman_compose_provider == 'podman-compose'
+     else '/usr/local/bin/docker-compose' }}
+harbor_podman_socket: /run/podman/podman.sock     # docker-compose provider talks to Podman here
+harbor_podman_log_driver: journald                # Podman has no syslog driver: journald | k8s-file
+harbor_compose_project: harbor
+
+# --- layout ----------------------------------------------------------------
+harbor_install_parent: "{{ install_root | default('/opt') }}"
+harbor_install_dir: "{{ harbor_install_parent }}/harbor"
+harbor_download_dir: "{{ stage_root | default('/var/staging') }}/harbor"
+harbor_data_volume: /data
+harbor_http_port: 80
+harbor_https_port: 443
+harbor_with_trivy: false              # Trivy needs an internet-fed vulnerability database
+harbor_manage_systemd: true           # always on for Podman, since the unit is how Harbor starts
+harbor_manage_selinux: true           # label Harbor's paths container_file_t for Podman
+harbor_version_marker: "{{ harbor_install_dir }}/.installed_version"
+harbor_runtime_marker: "{{ harbor_install_dir }}/.installed_runtime"
+harbor_data_require_mount: false      # true: stop unless harbor_data_volume is its own mounted filesystem
+harbor_cert_sync: true                # copy a renewed certificate into Harbor and restart its proxy
+harbor_upgrade_backup_db: true        # copy the database directory before an in-place upgrade
+
+# --- desired_state: absent ---------------------------------------------------
+harbor_purge_install: false           # also delete harbor_install_dir
+harbor_purge_data: false              # also empty harbor_data_volume (registry content); the directory or mount stays

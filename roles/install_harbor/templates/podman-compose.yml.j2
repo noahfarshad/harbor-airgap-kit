@@ -1,0 +1,25 @@
+# {{ ansible_managed }}
+#
+# Generated from the docker-compose.yml that Harbor's prepare step writes.
+# Changes for Podman:
+#   - the log service (rsyslog on 1514) is removed, with every depends_on on it
+#   - every service logs to {{ harbor_podman_log_driver }}, tagged with its service name
+# Everything else (images, volumes, ports, capabilities, networks) is unchanged.
+{% set src = harbor_compose_src %}
+{% set ns = namespace(services={}) %}
+{% for name, svc in src.services.items() if name != 'log' %}
+{%   set deps = svc.depends_on | default([]) %}
+{%   if deps is mapping %}
+{%     set deps = deps | dict2items | rejectattr('key', 'equalto', 'log') | items2dict %}
+{%   else %}
+{%     set deps = deps | reject('equalto', 'log') | list %}
+{%   endif %}
+{%   set patched = svc | combine({'logging': {'driver': harbor_podman_log_driver, 'options': {'tag': name}}}) %}
+{%   if deps | length > 0 %}
+{%     set patched = patched | combine({'depends_on': deps}) %}
+{%   else %}
+{%     set patched = patched | dict2items | rejectattr('key', 'equalto', 'depends_on') | items2dict %}
+{%   endif %}
+{%   set ns.services = ns.services | combine({name: patched}) %}
+{% endfor %}
+{{ src | combine({'services': ns.services}) | to_nice_yaml(indent=2, width=4096) }}

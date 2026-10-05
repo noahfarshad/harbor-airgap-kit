@@ -1,0 +1,307 @@
+---
+# tasks file for configure_nexus: present
+#
+# Every step reads first and writes only what differs, so a second run reports
+# no changes.
+
+- name: Confirm the Nexus inputs are set
+  ansible.builtin.assert:
+    that:
+      - nexus_url | length > 0
+      - nexus_url is not search('CHANGE_ME')
+      - nexus_admin_password | length > 0
+      - nexus_read_user | length > 0
+      - nexus_read_password | length > 0
+      - nexus_upload_user | length > 0
+      - nexus_upload_password | length > 0
+    fail_msg: >-
+      Set nexus_url, and the Nexus admin password and the read and upload accounts
+      (nexus_admin_password, nexus_read_user and _password, nexus_upload_user and
+      _password; the passwords from the vault).
+    quiet: true
+
+- name: Wait for Nexus to accept writes
+  ansible.builtin.uri:
+    url: "{{ nexus_url }}/service/rest/v1/status/writable"
+    validate_certs: "{{ nexus_validate_certs }}"
+    status_code: 200
+  register: configure_nexus_writable
+  retries: "{{ nexus_wait_retries }}"
+  delay: "{{ nexus_wait_delay }}"
+  until: configure_nexus_writable.status == 200
+  changed_when: false
+
+- name: Check the admin password
+  ansible.builtin.uri:
+    url: "{{ nexus_url }}/service/rest/v1/security/users?userId={{ nexus_admin_user }}"
+    url_username: "{{ nexus_admin_user }}"
+    url_password: "{{ nexus_admin_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ nexus_validate_certs }}"
+    status_code: [200, 401]
+  register: configure_nexus_admin
+  changed_when: false
+
+- name: Set the admin password, the first time
+  when: configure_nexus_admin.status == 401
+  block:
+    - name: Stop if there is no first-start password to replace
+      ansible.builtin.assert:
+        that: nexus_admin_initial_password | length > 0
+        fail_msg: >-
+          Nexus refused {{ nexus_admin_user }} with the password in the vault, and there is
+          no first-start password to replace (nexus_admin_initial_password).
+        quiet: true
+
+    - name: Replace the generated admin password with the one in the vault
+      ansible.builtin.uri:
+        url: "{{ nexus_url }}/service/rest/v1/security/users/{{ nexus_admin_user }}/change-password"
+        method: PUT
+        url_username: "{{ nexus_admin_user }}"
+        url_password: "{{ nexus_admin_initial_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: text/plain
+        body: "{{ nexus_admin_password }}"
+        validate_certs: "{{ nexus_validate_certs }}"
+        status_code: 204
+      changed_when: true
+      no_log: true                     # the request body is the new password
+
+- name: Configure Nexus as admin
+  module_defaults:
+    ansible.builtin.uri:
+      url_username: "{{ nexus_admin_user }}"
+      url_password: "{{ nexus_admin_password }}"
+      force_basic_auth: true
+      validate_certs: "{{ nexus_validate_certs }}"
+  block:
+    - name: Read the EULA state
+      ansible.builtin.uri:
+        url: "{{ nexus_url }}/service/rest/v1/system/eula"
+        status_code: [200, 404]
+      register: configure_nexus_eula
+      changed_when: false
+
+    - name: Stop if the EULA is waiting and nobody has accepted it
+      ansible.builtin.fail:
+        msg: >-
+          {{ nexus_url }} is waiting for its end-user license agreement to be accepted.
+          Accept it in the Nexus UI, or set nexus_accept_eula: true to accept it from here.
+      when:
+        - not (nexus_accept_eula | bool)
+        - configure_nexus_eula.status == 200
+        - not (configure_nexus_eula.json.accepted | default(false) | bool)
+
+    - name: Accept the EULA
+      ansible.builtin.uri:
+        url: "{{ nexus_url }}/service/rest/v1/system/eula"
+        method: POST
+        body_format: json
+        body: "{{ configure_nexus_eula.json | combine({'accepted': true}) }}"
+        status_code: [200, 204]
+      changed_when: true
+      when:
+        - nexus_accept_eula | bool
+        - configure_nexus_eula.status == 200
+        - not (configure_nexus_eula.json.accepted | default(false) | bool)
+
+    - name: Read anonymous access
+      ansible.builtin.uri:
+        url: "{{ nexus_url }}/service/rest/v1/security/anonymous"
+      register: configure_nexus_anonymous
+      changed_when: false
+
+    - name: Set anonymous access
+      ansible.builtin.uri:
+        url: "{{ nexus_url }}/service/rest/v1/security/anonymous"
+        method: PUT
+        body_format: json
+        body:
+          enabled: "{{ nexus_anonymous_access | bool }}"
+          userId: "{{ configure_nexus_anonymous.json.userId | default('anonymous') }}"
+          realmName: "{{ configure_nexus_anonymous.json.realmName | default('NexusAuthorizingRealm') }}"
+        status_code: [200, 204]
+      changed_when: true
+      when: (configure_nexus_anonymous.json.enabled | bool) != (nexus_anonymous_access | bool)
+
+    # --- repositories -----------------------------------------------------------------
+    - name: Read the repositories
+      ansible.builtin.uri:
+        url: "{{ nexus_url }}/service/rest/v1/repositories/{{ item.format }}/hosted/{{ item.body.name }}"
+        status_code: [200, 404]
+      loop: "{{ configure_nexus_repositories }}"
+      loop_control:
+        label: "{{ item.format }}/{{ item.body.name }}"
+      register: configure_nexus_repo_state
+      changed_when: false
+
+    - name: Create the repositories that are missing
+      ansible.builtin.uri:
+        url: "{{ nexus_url }}/service/rest/v1/repositories/{{ item.item.format }}/hosted"
+        method: POST
+        body_format: json
+        body: "{{ item.item.body }}"
+        status_code: [200, 201]
+      loop: "{{ configure_nexus_repo_state.results }}"
+      loop_control:
+        label: "{{ item.item.format }}/{{ item.item.body.name }}"
+      when: item.status == 404
+      changed_when: true
+
+    - name: Update the repositories whose settings differ
+      ansible.builtin.uri:
+        url: "{{ nexus_url }}/service/rest/v1/repositories/{{ item.item.format }}/hosted/{{ item.item.body.name }}"
+        method: PUT
+        body_format: json
+        body: "{{ item.item.body }}"
+        status_code: [200, 204]
+      loop: "{{ configure_nexus_repo_state.results }}"
+      loop_control:
+        label: "{{ item.item.format }}/{{ item.item.body.name }}"
+      when:
+        - item.status == 200
+        - >-
+          (item.json.online | bool) != (item.item.body.online | bool)
+          or (item.json.storage.writePolicy | upper) != (item.item.body.storage.writePolicy | upper)
+          or (item.item.format == 'yum'
+              and (item.json.yum.repodataDepth | int) != (item.item.body.yum.repodataDepth | int))
+      changed_when: true
+
+    # --- roles --------------------------------------------------------------------------
+    - name: Read the roles
+      ansible.builtin.uri:
+        url: "{{ nexus_url }}/service/rest/v1/security/roles/{{ item.id }}"
+        status_code: [200, 404]
+      loop: "{{ configure_nexus_roles }}"
+      loop_control:
+        label: "{{ item.id }}"
+      register: configure_nexus_role_state
+      changed_when: false
+
+    - name: Create the roles that are missing
+      ansible.builtin.uri:
+        url: "{{ nexus_url }}/service/rest/v1/security/roles"
+        method: POST
+        body_format: json
+        body:
+          id: "{{ item.item.id }}"
+          name: "{{ item.item.id }}"
+          description: "{{ item.item.description }}"
+          privileges: "{{ item.item.privileges }}"
+          roles: []
+        status_code: [200, 201]
+      loop: "{{ configure_nexus_role_state.results }}"
+      loop_control:
+        label: "{{ item.item.id }}"
+      when: item.status == 404
+      changed_when: true
+
+    - name: Update the roles whose privileges differ
+      ansible.builtin.uri:
+        url: "{{ nexus_url }}/service/rest/v1/security/roles/{{ item.item.id }}"
+        method: PUT
+        body_format: json
+        body:
+          id: "{{ item.item.id }}"
+          name: "{{ item.item.id }}"
+          description: "{{ item.item.description }}"
+          privileges: "{{ item.item.privileges }}"
+          roles: []
+        status_code: [200, 204]
+      loop: "{{ configure_nexus_role_state.results }}"
+      loop_control:
+        label: "{{ item.item.id }}"
+      when:
+        - item.status == 200
+        - (item.json.privileges | sort) != (item.item.privileges | sort)
+      changed_when: true
+
+    # --- accounts -----------------------------------------------------------------------
+    - name: Read the accounts
+      ansible.builtin.uri:
+        url: "{{ nexus_url }}/service/rest/v1/security/users?userId={{ item }}"
+      loop: "{{ configure_nexus_user_ids }}"
+      register: configure_nexus_user_state
+      changed_when: false
+
+    - name: Create the accounts that are missing
+      ansible.builtin.uri:
+        url: "{{ nexus_url }}/service/rest/v1/security/users"
+        method: POST
+        body_format: json
+        body:
+          userId: "{{ item.item }}"
+          firstName: "{{ item.item }}"
+          lastName: harbor-airgap-kit
+          emailAddress: "{{ item.item }}@{{ nexus_user_email_domain }}"
+          password: "{{ configure_nexus_user_map[item.item].password }}"
+          status: active
+          roles:
+            - "{{ configure_nexus_user_map[item.item].role }}"
+        status_code: [200, 201]
+      loop: "{{ configure_nexus_user_state.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: (item.json | selectattr('userId', 'equalto', item.item) | list | length) == 0
+      changed_when: true
+      no_log: true                     # the request body carries the password
+
+    - name: Give existing accounts their role
+      ansible.builtin.uri:
+        url: "{{ nexus_url }}/service/rest/v1/security/users/{{ item.item }}"
+        method: PUT
+        body_format: json
+        body: >-
+          {{ (item.json | selectattr('userId', 'equalto', item.item) | first)
+             | combine({'roles': [configure_nexus_user_map[item.item].role]}) }}
+        status_code: [200, 204]
+      loop: "{{ configure_nexus_user_state.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when:
+        - (item.json | selectattr('userId', 'equalto', item.item) | list | length) == 1
+        - >-
+          (item.json | selectattr('userId', 'equalto', item.item) | first).roles
+          != [configure_nexus_user_map[item.item].role]
+      changed_when: true
+
+- name: Check each account signs in with the password in the vault
+  ansible.builtin.uri:
+    url: "{{ nexus_url }}/service/rest/v1/security/users?userId={{ item }}"
+    url_username: "{{ item }}"
+    url_password: "{{ configure_nexus_user_map[item].password }}"
+    force_basic_auth: true
+    validate_certs: "{{ nexus_validate_certs }}"
+    status_code: [200, 401, 403]       # 403: signed in, and rightly not allowed to read accounts
+  loop: "{{ configure_nexus_user_ids }}"
+  register: configure_nexus_signin
+  changed_when: false
+
+- name: Set the vault password on accounts that refused it
+  ansible.builtin.uri:
+    url: "{{ nexus_url }}/service/rest/v1/security/users/{{ item.item }}/change-password"
+    method: PUT
+    url_username: "{{ nexus_admin_user }}"
+    url_password: "{{ nexus_admin_password }}"
+    force_basic_auth: true
+    headers:
+      Content-Type: text/plain
+    body: "{{ configure_nexus_user_map[item.item].password }}"
+    validate_certs: "{{ nexus_validate_certs }}"
+    status_code: 204
+  loop: "{{ configure_nexus_signin.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.status == 401
+  changed_when: true
+  no_log: true                         # the request body is the password
+
+- name: Report what the kit will use
+  ansible.builtin.debug:
+    msg:
+      - "Nexus:  {{ nexus_url }}"
+      - "Files:  {{ nexus_url }}/repository/{{ nexus_raw_repo }}/  (raw, hosted)"
+      - "{{ ('RPMs:   ' ~ nexus_url ~ '/repository/' ~ nexus_yum_repo ~ '/  (yum, hosted, repodata depth '
+             ~ nexus_yum_repodata_depth ~ ')') if nexus_yum_repo_enabled | bool else 'RPMs:   no yum repository' }}"
+      - "Read:   {{ nexus_read_user }} ({{ nexus_read_role }})    Upload: {{ nexus_upload_user }} ({{ nexus_upload_role }})"

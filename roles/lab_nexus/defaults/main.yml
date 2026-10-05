@@ -1,0 +1,17 @@
+---
+# defaults file for lab_nexus
+#
+# The lab's Nexus Repository: one Podman container run by systemd (a Quadlet
+# unit), with its data in a named volume. Lab only; a real environment already
+# has its own Nexus.
+
+lab_nexus_image: docker.io/sonatype/nexus3:3.96.4   # pinned; mirror.gcr.io/sonatype/nexus3:3.96.4 if Docker Hub rate-limits
+lab_nexus_name: nexus
+lab_nexus_port: 8081
+lab_nexus_volume: nexus-data
+lab_nexus_heap: 1g                                   # -Xms, -Xmx and direct memory each
+lab_nexus_start_retries: 90                          # x 10 s: a first start takes a few minutes
+lab_nexus_start_delay: 10
+
+# --- desired_state: absent ----------------------------------------------------------
+lab_nexus_purge_data: false                          # true also deletes the volume: every repository and account

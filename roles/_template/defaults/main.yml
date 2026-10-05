@@ -1,0 +1,7 @@
+---
+# defaults file for rolename
+#
+# Lowest-priority values. Anything that differs between environments belongs in
+# inventories/<env>/group_vars or host_vars, not here.
+
+rolename_example: ""

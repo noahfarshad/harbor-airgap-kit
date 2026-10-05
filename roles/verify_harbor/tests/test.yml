@@ -1,0 +1,6 @@
+---
+- name: Smoke-test verify_harbor
+  hosts: localhost
+  remote_user: root
+  roles:
+    - verify_harbor

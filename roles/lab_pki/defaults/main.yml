@@ -1,0 +1,16 @@
+---
+# defaults file for lab_pki
+#
+# The lab's own certificate authority, a server certificate signed by it for the
+# lab's names, the CA trusted system-wide, and the names in /etc/hosts. Lab only;
+# in a real environment the registry gets its certificate from IdM (harbor_tls_mode: ipa).
+
+lab_pki_dir: /etc/harbor-lab/pki
+lab_pki_ca_name: harbor-airgap-kit lab CA
+lab_pki_ca_days: 3650
+lab_pki_server_days: 825
+lab_pki_names:                                   # the first name is the certificate's CN
+  - "{{ harbor_hostname }}"
+  - nexus.lab.internal
+lab_pki_trust_anchor: /etc/pki/ca-trust/source/anchors/harbor-airgap-kit-lab-ca.crt
+lab_pki_hosts_address: 127.0.0.1                 # every lab name resolves to this machine

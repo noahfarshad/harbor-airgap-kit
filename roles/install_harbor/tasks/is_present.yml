@@ -1,0 +1,156 @@
+---
+# tasks file for install_harbor: present
+#
+# harbor.yml is created from the template the installer ships, so it always
+# carries the keys that Harbor release expects. Only the values below change.
+
+- name: Confirm a supported container runtime
+  ansible.builtin.assert:
+    that:
+      - harbor_container_runtime in ['podman', 'docker']
+      - harbor_podman_compose_provider in ['podman-compose', 'docker-compose']
+    fail_msg: "harbor_container_runtime must be podman or docker; harbor_podman_compose_provider podman-compose or docker-compose."
+    quiet: true
+
+- name: Read the runtime Harbor was installed on
+  ansible.builtin.slurp:
+    src: "{{ harbor_runtime_marker }}"
+  register: harbor_runtime_file
+  failed_when: false
+
+- name: Stop if the runtime would change under a running registry
+  ansible.builtin.assert:
+    that:
+      - harbor_runtime_file.content is not defined or
+        (harbor_runtime_file.content | b64decode | trim) == harbor_container_runtime
+    fail_msg: >-
+      Harbor is installed on {{ harbor_runtime_file.content | default('') | b64decode | trim }}.
+      Run remove_registry.yml first (make remove-registry; registry data is kept), then deploy
+      with harbor_container_runtime: {{ harbor_container_runtime }}.
+    quiet: true
+
+- name: Check whether the data volume is its own filesystem
+  ansible.builtin.command:
+    cmd: "findmnt --noheadings --output TARGET --target {{ harbor_data_volume }}"
+  register: harbor_data_mount
+  changed_when: false
+  failed_when: false
+  when: harbor_data_require_mount | bool
+
+- name: Stop if the data volume is not mounted
+  ansible.builtin.assert:
+    that:
+      - harbor_data_mount.stdout | trim == harbor_data_volume
+    fail_msg: "{{ harbor_data_volume }} is not a mounted filesystem. Mount the registry disk first."
+    quiet: true
+  when: harbor_data_require_mount | bool
+
+- name: Read the installed Harbor version
+  ansible.builtin.slurp:
+    src: "{{ harbor_version_marker }}"
+  register: harbor_version_file
+  failed_when: false
+
+- name: Note the installed version
+  ansible.builtin.set_fact:
+    harbor_installed_version: "{{ (harbor_version_file.content | b64decode | trim) if harbor_version_file.content is defined else '' }}"
+
+- name: Upgrade the existing release in place
+  ansible.builtin.include_tasks: upgrade.yml
+  when:
+    - harbor_installed_version | length > 0
+    - harbor_installed_version != harbor_version
+
+- name: Unpack the installer
+  ansible.builtin.unarchive:
+    src: "{{ harbor_download_dir }}/{{ harbor_installer_file }}"
+    dest: "{{ harbor_install_parent }}"
+    remote_src: true
+    creates: "{{ harbor_install_dir }}/install.sh"
+    owner: root
+    group: root
+
+- name: Create the data volume
+  ansible.builtin.file:
+    path: "{{ harbor_data_volume }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Check for an existing deployment
+  ansible.builtin.stat:
+    path: "{{ harbor_install_dir }}/{{ 'podman-compose.yml' if harbor_container_runtime == 'podman' else 'docker-compose.yml' }}"
+  register: harbor_existing
+
+- name: Note whether Harbor is already deployed
+  ansible.builtin.set_fact:
+    harbor_already_deployed: "{{ harbor_existing.stat.exists }}"
+
+- name: Create harbor.yml from the shipped template
+  ansible.builtin.copy:
+    src: "{{ harbor_install_dir }}/harbor.yml.tmpl"
+    dest: "{{ harbor_install_dir }}/harbor.yml"
+    remote_src: true
+    force: false
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Set the values Harbor needs
+  ansible.builtin.replace:
+    path: "{{ harbor_install_dir }}/harbor.yml"
+    regexp: "{{ item.regexp }}"
+    replace: "{{ item.replace }}"
+  loop:
+    - regexp: '(?m)^hostname:.*$'
+      replace: "hostname: {{ harbor_hostname }}"
+    - regexp: '(?m)^(\s{2})port: 80$'
+      replace: '\g<1>port: {{ harbor_http_port }}'
+    - regexp: '(?m)^(\s{2})port: 443$'
+      replace: '\g<1>port: {{ harbor_https_port }}'
+    - regexp: '(?m)^(\s{2})certificate:.*$'
+      replace: '\g<1>certificate: {{ harbor_tls_cert }}'
+    - regexp: '(?m)^(\s{2})private_key:.*$'
+      replace: '\g<1>private_key: {{ harbor_tls_key }}'
+    - regexp: '(?m)^(\s{2})password: root123$'
+      replace: '\g<1>password: {{ harbor_db_password }}'
+    - regexp: '(?m)^data_volume:.*$'
+      replace: "data_volume: {{ harbor_data_volume }}"
+  loop_control:
+    label: "{{ item.regexp }}"
+  no_log: true
+  notify: Reinstall harbor
+
+# Harbor reads the admin password only on first start; later changes are made in
+# Harbor itself (and in the vault), so the file is only seeded before first deploy.
+- name: Seed the initial admin password
+  ansible.builtin.replace:
+    path: "{{ harbor_install_dir }}/harbor.yml"
+    regexp: '(?m)^harbor_admin_password:.*$'
+    replace: "harbor_admin_password: {{ harbor_admin_password }}"
+  no_log: true
+  when: not harbor_already_deployed | bool
+
+- name: Install on the chosen runtime
+  ansible.builtin.include_tasks: "install_{{ harbor_container_runtime }}.yml"
+
+- name: Keep the served certificate in step with renewals
+  ansible.builtin.include_tasks: cert_sync.yml
+  when: harbor_cert_sync | bool
+
+- name: Record the installed version
+  ansible.builtin.copy:
+    content: "{{ harbor_version }}\n"
+    dest: "{{ harbor_version_marker }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Record the runtime
+  ansible.builtin.copy:
+    content: "{{ harbor_container_runtime }}\n"
+    dest: "{{ harbor_runtime_marker }}"
+    owner: root
+    group: root
+    mode: "0644"

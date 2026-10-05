@@ -1,0 +1,6 @@
+---
+# handlers file for lab_nexus
+
+- name: Reload systemd for the Nexus unit
+  ansible.builtin.systemd_service:
+    daemon_reload: true

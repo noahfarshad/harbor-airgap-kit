@@ -1,0 +1,6 @@
+---
+- name: Smoke-test configure_harbor_tls
+  hosts: localhost
+  remote_user: root
+  roles:
+    - configure_harbor_tls

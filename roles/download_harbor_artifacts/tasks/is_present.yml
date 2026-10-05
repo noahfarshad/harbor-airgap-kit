@@ -1,0 +1,71 @@
+---
+# tasks file for download_harbor_artifacts: present
+
+- name: Confirm the release inputs are loaded
+  ansible.builtin.assert:
+    that:
+      - harbor_installer_file | default('') | length > 0
+      - harbor_installer_sha256 | default('') | length == 64
+      - artifact_source | default('') in ['repo', 'staged']
+    fail_msg: >-
+      Load group_vars/registry/harbor_artifacts.yml (from stage_harbor_artifacts)
+      and set artifact_source to repo or staged in group_vars/all.
+    quiet: true
+
+- name: Create the landing directory
+  ansible.builtin.file:
+    path: "{{ harbor_download_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Pull the installer from the environment repository
+  ansible.builtin.get_url:
+    url: "{{ artifact_repo_url }}/{{ harbor_artifact_path }}/{{ harbor_installer_file }}"
+    dest: "{{ harbor_download_dir }}/{{ harbor_installer_file }}"
+    checksum: "sha256:{{ harbor_installer_sha256 }}"
+    url_username: "{{ artifact_repo_username | default(omit, true) }}"
+    url_password: "{{ artifact_repo_password | default(omit, true) }}"
+    force_basic_auth: "{{ (artifact_repo_username | default('') | length > 0) | bool }}"
+    headers: "{{ artifact_repo_headers | default({}) }}"
+    validate_certs: "{{ artifact_repo_validate_certs | default(true) }}"
+    mode: "0640"
+  when: artifact_source == 'repo'
+
+- name: Copy the installer from storage attached to the registry host
+  ansible.builtin.copy:
+    src: "{{ artifact_staging }}/{{ harbor_artifact_path }}/{{ harbor_installer_file }}"
+    dest: "{{ harbor_download_dir }}/{{ harbor_installer_file }}"
+    remote_src: true
+    mode: "0640"
+  when:
+    - artifact_source == 'staged'
+    - artifact_staged_on | default('target') == 'target'
+
+- name: Copy the installer from storage attached to the control host
+  ansible.builtin.copy:
+    src: "{{ artifact_staging }}/{{ harbor_artifact_path }}/{{ harbor_installer_file }}"
+    dest: "{{ harbor_download_dir }}/{{ harbor_installer_file }}"
+    mode: "0640"
+  when:
+    - artifact_source == 'staged'
+    - artifact_staged_on | default('target') == 'controller'
+
+- name: Read the installer checksum on the host
+  ansible.builtin.stat:
+    path: "{{ harbor_download_dir }}/{{ harbor_installer_file }}"
+    checksum_algorithm: sha256
+    get_checksum: true
+  register: harbor_installer_stat
+
+- name: Stop if the installer does not match the manifest
+  ansible.builtin.assert:
+    that:
+      - harbor_installer_stat.stat.exists
+      - harbor_installer_stat.stat.checksum == harbor_installer_sha256
+    fail_msg: >-
+      {{ harbor_installer_file }} does not match harbor_artifacts.yml.
+      Expected {{ harbor_installer_sha256 }},
+      found {{ harbor_installer_stat.stat.checksum | default('no file') }}.
+    quiet: true

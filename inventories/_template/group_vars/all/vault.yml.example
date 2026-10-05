@@ -1,0 +1,26 @@
+---
+# inventories/<env>/group_vars/all/vault.yml.example
+#
+# Copy to vault.yml, set real values, then encrypt it:
+#   cp vault.yml.example vault.yml
+#   ansible-vault encrypt inventories/<env>/group_vars/all/vault.yml
+#
+# Never commit or carry an unencrypted vault.yml. Each environment creates its own.
+
+# Harbor admin: seeded on the first build only. After that, change it in the
+# Harbor portal and keep this value in step so verify and projects can sign in.
+vault_harbor_admin_password:  "REPLACE-WITH-HARBOR-ADMIN-PASSWORD"
+
+# Harbor's internal PostgreSQL password
+vault_harbor_db_password:     "REPLACE-WITH-HARBOR-DATABASE-PASSWORD"
+
+# Nexus account Ansible and dnf read the Harbor files with. Leave both empty if Nexus
+# allows anonymous read on the raw and yum repositories.
+vault_repo_username:          ""
+vault_repo_password:          ""
+
+# Only for make configure-nexus: the Nexus admin, and the account kit publish
+# uploads with (kit publish asks for it when NEXUS_USER/NEXUS_PASSWORD are unset).
+# vault_nexus_admin_password:   "REPLACE-WITH-NEXUS-ADMIN-PASSWORD"
+# vault_nexus_upload_user:      "kit-upload"
+# vault_nexus_upload_password:  "REPLACE-WITH-NEXUS-UPLOAD-PASSWORD"

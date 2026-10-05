@@ -1,0 +1,7 @@
+---
+# tasks file for download_harbor_artifacts: absent
+
+- name: Remove the landing directory
+  ansible.builtin.file:
+    path: "{{ harbor_download_dir }}"
+    state: absent

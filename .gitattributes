@@ -1,0 +1,3 @@
+# Unix line endings on every checkout, Git for Windows included, so the
+# scripts and the Makefile run under WSL and on RHEL.
+* text=auto eol=lf

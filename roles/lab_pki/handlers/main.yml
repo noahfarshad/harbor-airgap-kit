@@ -1,0 +1,7 @@
+---
+# handlers file for lab_pki
+
+- name: Rebuild the system trust store
+  ansible.builtin.command:
+    cmd: update-ca-trust extract
+  changed_when: true

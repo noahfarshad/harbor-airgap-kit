@@ -1,0 +1,91 @@
+---
+# tasks file for lab_pki: present
+
+- name: Create the PKI directory
+  ansible.builtin.file:
+    path: "{{ lab_pki_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Create the CA key
+  ansible.builtin.command:
+    cmd: "openssl genrsa -out {{ lab_pki_dir }}/ca.key 4096"
+    creates: "{{ lab_pki_dir }}/ca.key"
+
+# The CA may only sign for the lab's own names (name constraints), so trusting it
+# in a browser or on Windows trusts nothing else, even if its key ever got out.
+- name: Create the CA certificate
+  ansible.builtin.command:
+    cmd: >-
+      openssl req -x509 -new -key {{ lab_pki_dir }}/ca.key -sha256
+      -days {{ lab_pki_ca_days }} -subj "/CN={{ lab_pki_ca_name }}"
+      -addext "basicConstraints=critical,CA:TRUE,pathlen:0"
+      -addext "keyUsage=critical,keyCertSign,cRLSign"
+      -addext "nameConstraints=critical,{{ lab_pki_permitted | join(',') }}"
+      -out {{ lab_pki_dir }}/ca.crt
+    creates: "{{ lab_pki_dir }}/ca.crt"
+  vars:
+    lab_pki_permitted: >-
+      {{ (lab_pki_names | map('regex_replace', '^[^.]+[.](?=.*[.])', '') | unique
+          | map('regex_replace', '^', 'permitted;DNS:') | list)
+         + ['permitted;DNS:localhost', 'permitted;IP:127.0.0.1/255.255.255.255'] }}
+
+- name: Write the server certificate's extensions
+  ansible.builtin.copy:
+    dest: "{{ lab_pki_dir }}/server.ext"
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      basicConstraints=CA:FALSE
+      keyUsage=critical,digitalSignature,keyEncipherment
+      extendedKeyUsage=serverAuth
+      subjectAltName={{ (lab_pki_names | map('regex_replace', '^', 'DNS:') | list
+                         + ['DNS:localhost', 'IP:127.0.0.1']) | join(',') }}
+  register: lab_pki_ext
+
+- name: Create the server key
+  ansible.builtin.command:
+    cmd: "openssl genrsa -out {{ lab_pki_dir }}/{{ lab_pki_names[0] }}.key 2048"
+    creates: "{{ lab_pki_dir }}/{{ lab_pki_names[0] }}.key"
+
+- name: Check for the server certificate
+  ansible.builtin.stat:
+    path: "{{ lab_pki_dir }}/{{ lab_pki_names[0] }}.crt"
+  register: lab_pki_server_cert
+
+- name: Sign the server certificate
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail &&
+      openssl req -new -key {{ lab_pki_dir }}/{{ lab_pki_names[0] }}.key -subj "/CN={{ lab_pki_names[0] }}" |
+      openssl x509 -req -CA {{ lab_pki_dir }}/ca.crt -CAkey {{ lab_pki_dir }}/ca.key -CAcreateserial
+      -days {{ lab_pki_server_days }} -sha256 -extfile {{ lab_pki_dir }}/server.ext
+      -out {{ lab_pki_dir }}/{{ lab_pki_names[0] }}.crt
+    executable: /bin/bash
+  when: not lab_pki_server_cert.stat.exists or lab_pki_ext.changed
+  changed_when: true
+
+- name: Trust the lab CA system-wide
+  ansible.builtin.copy:
+    src: "{{ lab_pki_dir }}/ca.crt"
+    dest: "{{ lab_pki_trust_anchor }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Rebuild the system trust store
+
+- name: Point the lab names at this machine
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^\S+\s+{{ item | regex_escape }}(\s|$)'
+    line: "{{ lab_pki_hosts_address }} {{ item }}"
+    unsafe_writes: true                     # /etc/hosts is bind-mounted under containers and WSL
+  loop: "{{ lab_pki_names }}"
+
+# Whatever runs next may call the lab's names over TLS.
+- name: Rebuild the system trust store now, if the CA changed
+  ansible.builtin.meta: flush_handlers

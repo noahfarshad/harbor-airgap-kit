@@ -1,0 +1,18 @@
+---
+# verify_registry.yml
+#
+# Read-only checks on the Harbor registry: containers, API health, projects and
+# the served certificate. Safe to run any time.
+#
+# Usage:
+#   make verify-registry ENV=<env>
+
+- name: Verify the Harbor container registry
+  hosts: registry
+  gather_facts: false
+  become: true
+  vars:
+    desired_state: present
+
+  roles:
+    - { role: verify_harbor, tags: [verify_harbor] }

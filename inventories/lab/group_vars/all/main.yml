@@ -1,0 +1,12 @@
+---
+# inventories/lab/group_vars/all/main.yml
+#
+# Settings everything in the lab shares.
+
+ansible_python_interpreter:  /usr/bin/python3
+
+install_root:        /opt
+stage_root:          /var/staging
+artifact_staging:    /var/staging/artifacts   # where kit publish stages kits
+
+enable_firewall:     false                    # WSL has no firewalld; a VM lab may turn it on

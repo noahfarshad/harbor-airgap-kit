@@ -1,0 +1,31 @@
+# kits/lab.yml: the transfer the lab builds and loads (make lab-demo).
+#
+# Same layout as any other kit.yml. The Broadcom content is whatever
+# inventories/lab/group_vars/registry/broadcom.yml turns on.
+
+name: lab-harbor-2.15.2
+
+output:
+  dir: /var/tmp/kit-transfer            # inside the lab machine
+  windows_copy: false
+
+tools:
+  cosign: latest
+  imgpkg: latest
+
+harbor:
+  version: "2.15.2"
+  verify_signature: true
+  compose_provider: docker-compose      # inventories/lab/group_vars/registry/main.yml must match
+  docker_compose_version: v5.5.1
+
+docker_ce:                              # carried every time, so make lab-demo RUNTIME=docker
+  enabled: true                         # rehearses a registry on Docker CE
+
+broadcom:
+  environments: [lab]
+  services_dir: broadcom/services
+  services_project: sup-services
+  bundles: []
+
+files: []

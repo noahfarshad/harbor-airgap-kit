@@ -1,0 +1,26 @@
+---
+# tasks file for install_harbor: Docker Engine and Compose
+
+- name: Run the Harbor installer
+  ansible.builtin.command:
+    cmd: "./install.sh{{ ' --with-trivy' if harbor_with_trivy | bool else '' }}"
+    chdir: "{{ harbor_install_dir }}"
+    creates: "{{ harbor_install_dir }}/docker-compose.yml"
+  timeout: 1800
+
+- name: Install the systemd unit
+  ansible.builtin.template:
+    src: harbor.service.j2
+    dest: /etc/systemd/system/harbor.service
+    owner: root
+    group: root
+    mode: "0644"
+  when: harbor_manage_systemd | bool
+
+- name: Enable Harbor at boot
+  ansible.builtin.systemd:
+    name: harbor
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: harbor_manage_systemd | bool

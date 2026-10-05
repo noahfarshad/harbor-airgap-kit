@@ -1,0 +1,22 @@
+# {{ ansible_managed }}
+# Nexus Repository for the harbor-airgap-kit lab. Quadlet turns this file into
+# {{ lab_nexus_name }}.service; systemctl status {{ lab_nexus_name }} shows it.
+
+[Unit]
+Description=Nexus Repository (harbor-airgap-kit lab)
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+ContainerName={{ lab_nexus_name }}
+Image={{ lab_nexus_image }}
+PublishPort={{ lab_nexus_port }}:8081
+Volume={{ lab_nexus_volume }}:/nexus-data
+Environment="INSTALL4J_ADD_VM_PARAMS=-Xms{{ lab_nexus_heap }} -Xmx{{ lab_nexus_heap }} -XX:MaxDirectMemorySize={{ lab_nexus_heap }} -Djava.util.prefs.userRoot=/nexus-data/javaprefs"
+
+[Service]
+Restart=always
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

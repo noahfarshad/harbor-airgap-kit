@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: verify_harbor
+  author: Noah Farshad
+  description: "Read-only checks on a Harbor registry: containers, API health, projects and certificate."
+  license: GPL-3.0-only
+  min_ansible_version: "2.16"
+  platforms:
+    - name: EL
+      versions:
+        - "9"
+  galaxy_tags:
+    - harbor
+    - verify
+dependencies: []

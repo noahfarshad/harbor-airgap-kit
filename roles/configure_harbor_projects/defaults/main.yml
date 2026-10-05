@@ -1,0 +1,16 @@
+---
+# defaults file for configure_harbor_projects
+
+harbor_projects: []                   # set in group_vars/registry
+broadcom_items: {}                    # set in group_vars/registry/broadcom.yml
+harbor_catalog_file: "{{ playbook_dir }}/broadcom/catalog.yml"
+# The projects this environment's Broadcom items go to (broadcom/catalog.yml), beyond harbor_projects
+harbor_item_projects: >-
+  {{ (broadcom_items | dict2items | selectattr('value') | map(attribute='key')
+      | map('extract', lookup('ansible.builtin.file', harbor_catalog_file) | from_yaml)
+      | map(attribute='project') | unique | list)
+     | difference(harbor_projects | default([]) | map(attribute='name') | list) }}
+harbor_api_url: "https://{{ harbor_hostname }}:{{ harbor_https_port | default(443) }}/api/v2.0"
+harbor_api_validate_certs: true
+harbor_api_wait_retries: 60
+harbor_api_wait_delay: 10

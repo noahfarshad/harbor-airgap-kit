@@ -1,0 +1,26 @@
+---
+# configure_nexus.yml
+#
+# Creates, or brings into line, the Nexus repositories and accounts the kit uses:
+# raw and yum (hosted) repositories, and read and upload roles and accounts. The
+# REST calls go from the control host to nexus_url, so this works on any Nexus
+# Repository 3 an admin account can reach.
+#
+# Usage:
+#   make configure-nexus ENV=<env>
+#   ansible-playbook -i inventories/<env>/hosts configure_nexus.yml --ask-vault-pass
+#
+# REQUIRED, in inventories/<env>/group_vars/all/:
+#   artifacts.yml   nexus_url, nexus_raw_repo, nexus_yum_repo
+#   nexus.yml       the accounts, and the passwords from the vault
+#   vault.yml       vault_nexus_admin_password, vault_repo_password, vault_nexus_upload_password
+
+- name: Configure the kit's Nexus repositories and accounts
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    desired_state: present
+
+  roles:
+    - { role: configure_nexus, tags: [configure_nexus] }

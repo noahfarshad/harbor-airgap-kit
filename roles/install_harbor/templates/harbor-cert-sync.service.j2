@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Copy a renewed certificate into Harbor and restart its proxy
+After=harbor.service
+
+[Service]
+Type=oneshot
+# Same placement, owner and mode as Harbor's own prepare step
+ExecStart=/usr/bin/install -o 10000 -g 10000 -m 0644 {{ harbor_tls_key }} {{ harbor_data_volume }}/secret/cert/server.key
+ExecStart=/usr/bin/install -o 10000 -g 10000 -m 0644 {{ harbor_tls_cert }} {{ harbor_data_volume }}/secret/cert/server.crt
+ExecStart=/usr/bin/{{ harbor_container_runtime }} restart nginx

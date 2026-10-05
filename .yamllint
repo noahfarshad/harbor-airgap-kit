@@ -1,0 +1,29 @@
+---
+extends: default
+
+ignore: |
+  collections/
+  artifacts/
+  .venv/
+  dist/
+
+rules:
+  line-length:
+    max: 180
+  braces:
+    max-spaces-inside: 1
+  brackets:
+    max-spaces-inside: 1
+  # Inventory files keep aligned columns
+  colons:
+    max-spaces-after: -1
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable
+  truthy:
+    allowed-values: ["true", "false"]
+    check-keys: false
+  document-start: disable
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true

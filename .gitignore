@@ -1,0 +1,26 @@
+# Secrets
+.vault_pass
+inventories/*/group_vars/all/vault.yml.decrypted
+
+# Harbor files fetched on the connected side; they travel in a transfer, not in git
+artifacts/
+
+# The last harbor_artifacts.yml, kept by kit publish; git has the history
+inventories/*/group_vars/registry/harbor_artifacts.yml.previous
+
+# Ansible
+*.retry
+.ansible/
+collections/ansible_collections/
+
+# Python
+__pycache__/
+
+# [lab]
+# Lab state: the generated vault (lab/vault.sh) and the runtime (lab/runtime.sh)
+inventories/lab/group_vars/all/vault.yml
+inventories/lab/group_vars/registry/runtime.yml
+
+# ansible-core for the lab (lab/bootstrap.sh)
+.venv/
+# [/lab]

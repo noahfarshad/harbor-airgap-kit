@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: lab_pki
+  author: Noah Farshad
+  description: "Lab only: a CA and server certificate for the lab's names, trusted system-wide, with the names in /etc/hosts."
+  license: GPL-3.0-only
+  min_ansible_version: "2.14"
+  platforms:
+    - name: EL
+      versions:
+        - "9"
+  galaxy_tags:
+    - pki
+    - lab
+dependencies: []

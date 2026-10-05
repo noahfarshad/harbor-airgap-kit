@@ -1,0 +1,4 @@
+---
+# The playbooks use only ansible.builtin, so a plain ansible-core runs them and
+# nothing has to come from Galaxy. Collections a new role needs go here.
+collections: []

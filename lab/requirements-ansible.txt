@@ -1,0 +1,3 @@
+# ansible-core for the lab, installed into .venv by lab/bootstrap.sh (Python 3.12).
+# The same series the roles are linted and tested with.
+ansible-core>=2.19,<2.22

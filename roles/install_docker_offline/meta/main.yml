@@ -1,0 +1,16 @@
+---
+galaxy_info:
+  role_name: install_docker_offline
+  author: Noah Farshad
+  description: "Install Docker Engine and the Compose plugin with no internet access, from the environment yum repository or staged RPMs."
+  license: GPL-3.0-only
+  min_ansible_version: "2.16"
+  platforms:
+    - name: EL
+      versions:
+        - "9"
+  galaxy_tags:
+    - docker
+    - airgap
+    - rhel
+dependencies: []

@@ -1,0 +1,16 @@
+---
+# tasks file for install_podman_offline: absent
+#
+# Removes the compose provider only. Podman stays: other workloads may use it.
+
+- name: Remove podman-compose
+  ansible.builtin.dnf:
+    name: podman-compose
+    state: absent
+  when: podman_offline_compose_provider == 'podman-compose'
+
+- name: Remove the docker-compose binary
+  ansible.builtin.file:
+    path: "{{ podman_offline_docker_compose_bin }}"
+    state: absent
+  when: podman_offline_compose_provider == 'docker-compose'

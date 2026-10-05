@@ -1,0 +1,15 @@
+---
+# ansible-lint settings, used by make lint
+profile: production
+offline: true
+exclude_paths:
+  - artifacts/
+  - collections/
+  - .ansible/
+  - .venv/
+  - dist/
+  - roles/_template/tests/        # names the placeholder role until it is copied
+skip_list:
+  # Role inputs are prefixed by component (harbor_, podman_offline_, artifact_),
+  # shared across several roles, rather than by each role's own name.
+  - var-naming[no-role-prefix]

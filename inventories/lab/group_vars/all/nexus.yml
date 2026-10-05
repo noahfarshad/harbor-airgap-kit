@@ -1,0 +1,15 @@
+---
+# inventories/lab/group_vars/all/nexus.yml
+#
+# The Nexus accounts configure_nexus creates (make lab-up, make configure-nexus).
+# Passwords live in the vault.
+
+nexus_admin_user:          admin
+nexus_admin_password:      "{{ vault_nexus_admin_password }}"
+nexus_read_user:           "{{ vault_repo_username }}"       # Ansible and dnf read the Harbor files with it
+nexus_read_password:       "{{ vault_repo_password }}"
+nexus_upload_user:         "{{ vault_nexus_upload_user }}"   # kit publish uploads with it
+nexus_upload_password:     "{{ vault_nexus_upload_password }}"
+nexus_anonymous_access:    false
+nexus_yum_repo_enabled:    true
+nexus_accept_eula:         true          # the lab's Nexus Community Edition: make lab-up accepts Sonatype's EULA

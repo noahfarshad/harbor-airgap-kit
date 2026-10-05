@@ -1,0 +1,7 @@
+# inventories/connected/hosts
+#
+# The connected build host, where make stage-harbor puts the Harbor files
+# together. Nothing in here ever reaches an air-gapped environment.
+
+[stage]
+localhost ansible_connection=local
