@@ -1,0 +1,9 @@
+# inventories/dev/hosts
+#
+# essential.coach lab, dev. One group per kind of server.
+
+[registry]
+coach-registry
+
+[linux:children]
+registry

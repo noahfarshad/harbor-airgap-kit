@@ -1,0 +1,10 @@
+---
+# inventories/dev/host_vars/coach-registry.yml
+#
+# The registry in the essential.coach lab example. coach-registry is its name
+# in this inventory. The server name and the registry name are different.
+
+registry_server_fqdn:   registry01.example.coach
+ansible_host:           "{{ registry_server_fqdn }}"
+harbor_hostname:        registry.example.coach
+harbor_data_volume:     /data

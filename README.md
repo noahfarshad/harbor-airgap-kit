@@ -86,7 +86,7 @@ renewals.
 
 ## A new environment
 
-`inventories/coach-dev` is the multi-environment example space, filled as `registry.example.coach`. `inventories/example` is the single inventory with Broadcom items turned on:
+`inventories/dev` is filled as `registry.example.coach`:
 `registry01.example.coach`, Nexus off, a staged certificate, Podman, and a few
 Broadcom items turned on. Copy that directory, or the blank template, and
 replace `example.coach`. The build will not start while a `CHANGE_ME` is left.
@@ -110,7 +110,7 @@ configure_nexus.yml         sets up the kit's Nexus repos and accounts over Nexu
 stage_harbor_artifacts.yml  just the Harbor files, with Ansible on a connected RHEL box
 roles/                      one role per job, each with desired_state present | absent
 inventories/<env>/          one directory per environment
-inventories/example/        filled essential.coach lab example
+inventories/dev/            filled example, registry.example.coach
 inventories/_template/      start a new environment from this
 inventories/connected/      settings for stage_harbor_artifacts.yml
 broadcom/catalog.yml        the Broadcom content each environment can turn on
