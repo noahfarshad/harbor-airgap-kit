@@ -77,8 +77,11 @@ renewals.
 
 ## A new environment
 
-Copy the template, fill in every `CHANGE_ME` (the build won't start while any
-are left), and create the vault:
+`inventories/example` is filled the way the essential.coach lab records a site:
+`registry01.example.coach`, Nexus off, a staged certificate, Podman, and a few
+Broadcom items turned on. Copy that directory, or the blank template, and
+replace `example.coach`. The build will not start while a `CHANGE_ME` is left.
+Create the vault:
 
 ```bash
 cp -r inventories/_template inventories/<env>
@@ -98,6 +101,7 @@ configure_nexus.yml         sets up the kit's Nexus repos and accounts over Nexu
 stage_harbor_artifacts.yml  just the Harbor files, with Ansible on a connected RHEL box
 roles/                      one role per job, each with desired_state present | absent
 inventories/<env>/          one directory per environment
+inventories/example/        filled essential.coach lab example
 inventories/_template/      start a new environment from this
 inventories/connected/      settings for stage_harbor_artifacts.yml
 broadcom/catalog.yml        the Broadcom content each environment can turn on

@@ -1,0 +1,27 @@
+---
+# inventories/example/group_vars/all/environment.yml
+#
+# Facts the essential.coach lab would record for this example. The Harbor
+# roles do not read these directly. Documentation addresses only.
+
+env_name:             example
+env_description:      "essential.coach lab example"
+domain:               example.coach
+
+ipa_domain:           "{{ domain }}"
+ipa_realm:            EXAMPLE.COACH
+ipa_servers: []
+ipa_ca_cert:          /etc/ipa/ca.crt
+dns_zone:             "{{ domain }}"
+ntp_servers: []
+
+vcenter_hostname:     vc.example.coach
+vsphere_datacenter:   coach-dc
+vsphere_cluster:      coach-cluster
+
+networks:
+  mgmt:     { portgroup: vds-mgmt, vlan: 101, cidr: 192.0.2.0/24 }
+  workload: { portgroup: vds-wkld, vlan: 102, cidr: 198.51.100.0/24 }
+
+supervisor_api_vip:   "192.0.2.20"
+vks_clusters: []
