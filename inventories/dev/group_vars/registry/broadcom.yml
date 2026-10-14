@@ -6,9 +6,11 @@
 #   ["3.6.3", "3.7.1"]    several, e.g. to carry an upgrade path
 #   false                 left out
 #
-# python3 kit fetch carries whatever any environment turns on, make build-registry
-# creates the Harbor projects they go to, and python3 kit load --env <env> pushes
-# this environment's. python3 kit catalog shows the list and who has what on.
+# python3 kit choose --env <env> writes this list for you, on the connected
+# workstation before a fetch. python3 kit fetch carries whatever any environment
+# turns on, python3 kit build creates the Harbor projects they go to, and
+# python3 kit load pushes this environment's. python3 kit catalog shows the list
+# and who has what on.
 
 broadcom_items:
   # Supervisor Services. Their YAMLs come from support.broadcom.com: put them in

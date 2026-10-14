@@ -11,7 +11,7 @@ nexus_enabled:                false         # true: keep the Harbor files in thi
 artifact_source:              "{{ 'repo' if nexus_enabled | bool else 'staged' }}"
 
 # --- Nexus, only with nexus_enabled: true -----------------------------------------------
-nexus_url:                    "https://CHANGE_ME-nexus.example.com"
+nexus_url:                    "https://nexus.example.coach"
 nexus_raw_repo:               vmware-raw    # raw (hosted): installers, manifests, keys
 nexus_yum_repo:               harbor-epel   # yum (hosted), repodata depth 0: podman-compose kits
 artifact_repo_url:            "{{ nexus_url }}/repository/{{ nexus_raw_repo }}"

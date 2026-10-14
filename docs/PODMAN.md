@@ -49,7 +49,7 @@ journalctl CONTAINER_NAME=harbor-core -f      # per-service logs
 podman logs harbor-jobservice
 ```
 
-Restart after a configuration change: re-run `make build-registry`. A changed
+Restart after a configuration change: run `python3 kit build --env <env>` again. A changed
 value in `harbor.yml` regenerates the configuration and restarts the unit.
 
 ## Troubleshooting
@@ -82,7 +82,7 @@ journalctl -u harbor-cert-sync.service
 
 ## Rolling back and switching runtime
 
-`make remove-registry` stops Harbor, removes its units and generated compose
+`python3 kit remove --env <env>` stops Harbor, removes its units and generated compose
 files, and leaves `harbor.yml`, the data and the runtime in place. The kit never
 touches a registry you already have, so an old one keeps serving until you
 retire it.
@@ -90,6 +90,7 @@ retire it.
 Moving to Docker is a remove and a rebuild, not just a setting. Docker has to be
 available first, either from the server's own repos or from the transfer
 (`docker_ce.enabled: true` in `kit.yml` and `docker_offline_source: staged`).
-Then run `make remove-registry`, change `harbor_container_runtime`, and run
-`make build-registry`. `install_harbor` won't deploy on a different runtime from
+Then run `python3 kit remove --env <env>`, set `harbor_container_runtime` in
+`group_vars/registry/main.yml`, and run `python3 kit build --env <env>`.
+`install_harbor` won't deploy on a different runtime from
 the one it recorded until the remove has run.

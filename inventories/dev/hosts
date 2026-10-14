@@ -1,6 +1,14 @@
 # inventories/dev/hosts
 #
-# essential.coach lab, dev. One group per kind of server.
+# essential.coach lab, dev: the filled example. Copy this directory to
+# inventories/<env> and replace example.coach, or start from _template.
+#
+# One group per kind of server; each group's settings live in group_vars/<group>/
+# and each server's in host_vars/<host>.yml. coach-registry is only a label for the
+# registry in this inventory, not the server's name: Ansible connects to
+# registry_server_fqdn from host_vars/coach-registry.yml. Rename the label and that
+# file together. When Harbor goes on the machine you run Ansible from, set
+# ansible_connection: local in that file.
 
 [registry]
 coach-registry

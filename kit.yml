@@ -5,7 +5,7 @@
 #   python3 kit fetch     downloads and verifies everything into one transfer folder
 #
 # Inside the environment, TRANSFER.txt in the transfer folder lists the commands:
-# python3 kit publish, make build-registry, python3 kit load.
+# python3 kit publish, setup, build, load and verify.
 
 name: harbor-2.15.2                     # the transfer folder's name
 

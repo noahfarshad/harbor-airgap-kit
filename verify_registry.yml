@@ -5,7 +5,7 @@
 # the served certificate. Safe to run any time.
 #
 # Usage:
-#   make verify-registry ENV=<env>
+#   python3 kit verify --env <env>
 
 - name: Verify the Harbor container registry
   hosts: registry

@@ -8,6 +8,10 @@ artifacts/
 # The last harbor_artifacts.yml, kept by kit publish; git has the history
 inventories/*/group_vars/registry/harbor_artifacts.yml.previous
 
+# The catalog before the last refresh changed it (python3 kit catalog --refresh)
+broadcom/catalog.yml.previous
+broadcom/catalog.yml.new
+
 # Ansible
 *.retry
 .ansible/
@@ -16,11 +20,9 @@ collections/ansible_collections/
 # Python
 __pycache__/
 
-# [lab]
 # Lab state: the generated vault (lab/vault.sh) and the runtime (lab/runtime.sh)
 inventories/lab/group_vars/all/vault.yml
 inventories/lab/group_vars/registry/runtime.yml
 
 # ansible-core for the lab (lab/bootstrap.sh)
 .venv/
-# [/lab]

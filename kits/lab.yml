@@ -1,4 +1,4 @@
-# kits/lab.yml: the transfer the lab builds and loads (make lab-demo).
+# kits/lab.yml: the transfer the lab builds and loads (make lab-run).
 #
 # Same layout as any other kit.yml. The Broadcom content is whatever
 # inventories/lab/group_vars/registry/broadcom.yml turns on.
@@ -19,7 +19,7 @@ harbor:
   compose_provider: docker-compose      # inventories/lab/group_vars/registry/main.yml must match
   docker_compose_version: v5.5.1
 
-docker_ce:                              # carried every time, so make lab-demo RUNTIME=docker
+docker_ce:                              # carried every time, so make lab-run RUNTIME=docker
   enabled: true                         # rehearses a registry on Docker CE
 
 broadcom:

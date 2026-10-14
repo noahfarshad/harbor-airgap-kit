@@ -8,7 +8,7 @@
 
 # =============================================================================
 # Container runtime: harbor_container_runtime is lab state, in runtime.yml next
-# door (lab/runtime.sh): podman until make lab-demo RUNTIME=docker
+# door (lab/runtime.sh): podman until make lab-run RUNTIME=docker
 # =============================================================================
 harbor_podman_compose_provider:  docker-compose    # matches kits/lab.yml: docker-compose | podman-compose
 harbor_podman_socket:            /run/podman/podman.sock

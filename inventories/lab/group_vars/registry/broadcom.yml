@@ -6,7 +6,7 @@
 #   ["3.6.3", "3.7.1"]    several, e.g. to carry an upgrade path
 #   false                 left out
 #
-# make lab-demo fetches and loads whatever is turned on here. Each one is a real
+# make lab-run fetches and loads whatever is turned on here. Each one is a real
 # download from Broadcom: Argo CD is about 1.4 GB, Contour and AKO are small.
 # python3 kit catalog shows the list.
 

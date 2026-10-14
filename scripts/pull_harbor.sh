@@ -175,6 +175,5 @@ printf '%s\t%s\t%s\t%s\t%s\n' "$STAMP" "$(id -un)" "$SOURCE" "$VERSION" "$SHA" >
 
 log "Staged Harbor $VERSION in $CURRENT${PREVIOUS_VERSION:+ (previously $PREVIOUS_VERSION)}"
 if [[ -z "${KIT_RUNNING:-}" ]]; then   # python3 kit prints its own next steps
-  log "Next: make publish-harbor ENV=<environment> NEXUS=https://<nexus>, then make build-registry ENV=<environment>"
-  log "      (with artifact_source: staged, skip the publish)"
+  log "Next: python3 kit setup --env <environment>, then python3 kit build --env <environment>"
 fi

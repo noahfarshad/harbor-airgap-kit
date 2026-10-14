@@ -7,9 +7,11 @@
 # inventories/<env>/group_vars/all/artifacts.yml.
 #
 # Usage:
-#   make build-registry ENV=<env>
-#   # or:
-#   ansible-playbook -i inventories/<env>/hosts build_registry.yml --ask-vault-pass
+#   python3 kit build --env <env>
+#
+# kit build checks what would stop this playbook first (Ansible, the login and
+# sudo on the server, the vault, the staged files, the certificate), then runs
+# it. python3 kit setup --env <env> writes the settings below.
 #
 # REQUIRED, in inventories/<env>/:
 #   group_vars/all/artifacts.yml              artifact_source and its settings
@@ -22,6 +24,30 @@
   hosts: localhost
   gather_facts: false
   tasks:
+    # The name under [registry] in hosts is only a label. Its settings come from
+    # host_vars/<label>.yml, so renaming one without the other loses all of them.
+    - name: Stop when the registry has no settings
+      ansible.builtin.assert:
+        that:
+          - (hostvars[item].harbor_hostname | default('') | string | length) > 0
+        fail_msg: >-
+          {{ item }} has no harbor_hostname. The name under [registry] in hosts is
+          only a label, and its settings come from host_vars/{{ item }}.yml. If you
+          renamed it in hosts, rename that file to match.
+        quiet: true
+      loop: "{{ groups['registry'] | default([]) }}"
+
+    - name: Stop when the registry is this machine but Ansible would use SSH
+      ansible.builtin.assert:
+        that:
+          - (hostvars[item].ansible_host | default(item)) not in ['localhost', '127.0.0.1'] or
+            (hostvars[item].ansible_connection | default('ssh')) == 'local'
+        fail_msg: >-
+          {{ item }} points at this machine. Add ansible_connection: local to
+          host_vars/{{ item }}.yml so Ansible runs here instead of logging in over SSH.
+        quiet: true
+      loop: "{{ groups['registry'] | default([]) }}"
+
     - name: Stop on placeholder values
       ansible.builtin.assert:
         that:
@@ -48,7 +74,7 @@
       ansible.builtin.assert:
         that:
           - desired_state == 'present'
-        fail_msg: "To take Harbor off a host, run remove_registry.yml (make remove-registry)."
+        fail_msg: "To take Harbor off a host: python3 kit remove --env {{ inventory_dir | basename }}"
 
     - name: Confirm the host is a RedHat-family member of [registry]
       ansible.builtin.assert:

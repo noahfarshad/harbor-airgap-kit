@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lab/secrets.sh - print shell exports for the lab's demo, read from the vault:
+# lab/secrets.sh - print shell exports for the lab's end-to-end run, read from the vault:
 #   eval "$(bash lab/secrets.sh)"
 # NEXUS_USER/NEXUS_PASSWORD (upload account) for kit publish, HARBOR_PASSWORD for kit load.
 set -euo pipefail

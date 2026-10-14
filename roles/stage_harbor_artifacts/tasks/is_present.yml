@@ -135,4 +135,4 @@
       - "Kit:      {{ stage_harbor_output_dir }}"
       - "sha256:   {{ stage_harbor_installer.stat.checksum }}"
       - "Verify:   sha256sum -c SHA256SUMS, inside the output directory, once it is across"
-      - "Manifest: make pull-harbor ENV=<env> writes harbor_artifacts.yml into inventories/<env>/group_vars/registry/"
+      - "Manifest: scripts/pull_harbor.sh --inventory inventories/<env> writes harbor_artifacts.yml into its group_vars/registry/"

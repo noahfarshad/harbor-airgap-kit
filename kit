@@ -6,15 +6,25 @@ On the connected workstation (WSL or Linux, with internet access):
   python3 kit check      check kit.yml, the tools, and that every source can be reached
   python3 kit fetch      download and verify everything into one transfer folder
   python3 kit catalog    what broadcom/catalog.yml offers, and what each environment turns on
+  python3 kit choose --env ENV
+                         pick what that environment gets from the catalog (before a fetch)
+  python3 kit catalog --refresh
+                         look for newer versions in Broadcom's registry and ask yes or no
+                         before each change (--yes for unattended runs, --dry-run to only look)
 
 Inside the environment, from the repository the transfer carried in:
 
-  python3 kit verify  --from DIR             check a transfer against its SHA256SUMS
-  python3 kit publish --from DIR --env ENV   verify, stage the Harbor files, upload them
-                                             to Nexus, and stage the Broadcom bundles
-  python3 kit load    --env ENV              after make build-registry: push the Broadcom
-                                             items that environment turns on into Harbor,
-                                             and write the service YAMLs that point at it
+  python3 kit publish --from DIR --env ENV   check the transfer and stage it (and upload the
+                                             Harbor files to Nexus, when the environment uses one)
+  python3 kit setup   --env ENV              answer a few questions; the inventory, certificate
+                                             and vault are written for you (a new environment
+                                             starts from the template; run it again to change any)
+  python3 kit build   --env ENV              check everything, then build or update the registry
+  python3 kit load    --env ENV              push the Broadcom items that environment turns on
+                                             into Harbor, and write the service YAMLs for it
+  python3 kit verify  --env ENV              check the registry; --from DIR checks a transfer
+  python3 kit doctor  --env ENV              everything build checks, without building
+  python3 kit remove  --env ENV              take Harbor off the server; its images stay
 
 Needs python3 (3.6 or later), bash and curl. cosign and imgpkg are installed into
 ~/.local/bin when missing, each checked against its release checksums. Nothing
@@ -24,6 +34,8 @@ Exit codes: 0 done, 1 a usage or environment problem, 2 something failed its che
 """
 
 import argparse
+import atexit
+import concurrent.futures
 import datetime
 import difflib
 import getpass
@@ -466,6 +478,16 @@ def parse_ref(ref):
     return {"host": host, "path": repo_path, "tag": tag, "digest": digest}
 
 
+def version_key(text):
+    """1.33.5, 3.7.0-20260924 or 2025.8.19 as a tuple of its numbers, for sorting."""
+    return tuple(int(n) for n in re.findall(r"\d+", str(text)))
+
+
+def version_line(text):
+    """The release line a version belongs to: its first two numbers (3.7 for 3.7.1 and 3.7.0-20260924)."""
+    return version_key(text)[:2]
+
+
 def registry_probe(ref):
     """Check that a bundle or image exists, with anonymous access if the registry wants a token."""
     parts = parse_ref(ref)
@@ -697,10 +719,22 @@ def load_catalog(path):
         return {}
     name = os.path.relpath(path, REPO)
     with open(path, encoding="utf-8") as handle:
-        raw = parse_yaml(handle.read(), name) or {}
+        text = handle.read()
+    raw = parse_yaml(text, name) or {}
     if not isinstance(raw, dict):
         die("%s should be a set of items" % name)
     catalog, problems = {}, []
+    # YAML keeps the last of two identical keys without a word, so a version or an item
+    # listed twice would quietly hide one of them. Say so instead.
+    lines = text.splitlines(True)
+    tops = [m.group(1) for m in (re.match(r"^([A-Za-z0-9_.-]+):", line) for line in lines) if m]
+    for key in sorted({k for k in tops if tops.count(k) > 1}):
+        problems.append("%s: %s is in the file twice" % (name, key))
+    for key in set(tops):
+        start, end = item_bounds(lines, key)
+        listed = [e[0] for e in item_entries(lines, start, end)]
+        for version in sorted({v for v in listed if listed.count(v) > 1}):
+            problems.append("%s, %s: version %s is listed twice" % (name, key, version))
     for key, item in raw.items():
         where = "%s, %s" % (name, key)
         if not isinstance(item, dict):
@@ -749,12 +783,17 @@ def inventory_names():
     return sorted(d for d in os.listdir(root) if os.path.isfile(os.path.join(root, d, "hosts")))
 
 
+def environment_names():
+    """The inventories that are environments: not the template, and not the connected side's own."""
+    return [name for name in inventory_names() if not name.startswith("_") and name != "connected"]
+
+
 def broadcom_envs(cfg):
     """The environments this transfer carries Broadcom items for (broadcom.environments)."""
     value = cfg["broadcom"]["environments"]
     known = inventory_names()
     if value == "all":
-        return [name for name in known if not name.startswith("_")]
+        return environment_names()
     missing = [name for name in value if name not in known]
     if missing:
         die("broadcom.environments in %s: there is no inventory %s (there are: %s)"
@@ -870,6 +909,41 @@ def collect_bundles(cfg):
             die("%s and %s would both be %s in Harbor" % (targets[target], b["ref"], target))
         targets[target] = b["ref"]
     return bundles, services_dir, services
+
+
+CATALOG_STALE_DAYS = 90
+
+
+def warn_stale_catalog(cfg):
+    """Broadcom keeps releasing; a catalog nobody has checked in months quietly falls behind."""
+    path = repo_path(cfg["broadcom"]["catalog"])
+    try:
+        with open(path, encoding="utf-8") as handle:
+            match = re.search(r"(?m)^# Last checked:[ \t]*(\d{4}-\d{2}-\d{2})", handle.read())
+        age = (datetime.date.today() - datetime.datetime.strptime(match.group(1), "%Y-%m-%d").date()).days
+    except (OSError, AttributeError, ValueError):
+        return
+    if age > CATALOG_STALE_DAYS:
+        step("Broadcom catalog")
+        row("WARN", "%s was last checked on %s, %d days ago" % (os.path.relpath(path, REPO), match.group(1), age))
+        log("Run python3 kit catalog --refresh to see what Broadcom has released since.")
+
+
+def warn_missing_services(bundles, services_dir):
+    """Supervisor Services turned on with no YAML in broadcom/services/ that names their bundle.
+    Their bundles still go into Harbor; the YAML is what vCenter installs from."""
+    named = {parse_ref(b["ref"])["path"] for b in bundles if b["services"]}
+    missing = [b for b in bundles if b.get("item_kind") == "supervisor-service"
+               and parse_ref(b["ref"])["path"] not in named]
+    if not missing:
+        return
+    rel = os.path.relpath(services_dir, REPO)
+    step("Service YAMLs")
+    for b in missing:
+        row("WARN", "%s %s" % (b["item"], b["version"]), "no YAML in %s names its bundle" % rel, width=28)
+    log("Download each one from support.broadcom.com > My Downloads > vSphere Supervisor Services")
+    log("(on VCF 9.1, the legacy YAML) and put it in %s before you fetch, so the transfer" % rel)
+    log("carries it and kit load can write a copy that points at your Harbor.")
 
 
 # --- check and fetch (connected side) ---------------------------------------------------
@@ -1079,8 +1153,10 @@ def describe_transfer(cfg, root, bundles, started):
         "     --exclude=%s/inventories)" % REPO_NAME,
         "  cd ~/%s" % REPO_NAME,
         "  python3 kit publish --from <this folder> --env <environment>",
-        "  make build-registry ENV=<environment>",
-        "  python3 kit load --env <environment>",
+        "  python3 kit setup   --env <environment>     (the first time, or to change anything)",
+        "  python3 kit build   --env <environment>",
+        "  python3 kit load    --env <environment>",
+        "  python3 kit verify  --env <environment>",
     ]
     with open(os.path.join(root, "TRANSFER.txt"), "w") as out:
         out.write("\n".join(lines) + "\n")
@@ -1088,8 +1164,10 @@ def describe_transfer(cfg, root, bundles, started):
 
 def cmd_check(args):
     cfg = load_config(args.config)
-    bundles, _, services = collect_bundles(cfg)
+    bundles, services_dir, services = collect_bundles(cfg)
     plan_summary(cfg, bundles, services)
+    warn_stale_catalog(cfg)
+    warn_missing_services(bundles, services_dir)
     problems = preflight(cfg, bundles)
     print("")
     if problems:
@@ -1103,6 +1181,8 @@ def cmd_fetch(args):
     ensure_local_bin_on_path()
     bundles, services_dir, services = collect_bundles(cfg)
     plan_summary(cfg, bundles, services)
+    warn_stale_catalog(cfg)
+    warn_missing_services(bundles, services_dir)
     problems = preflight(cfg, bundles)
     if problems:
         die("%d problem(s) above: nothing was downloaded. Fix them, then run python3 kit fetch again" % problems, 2)
@@ -1225,7 +1305,8 @@ class Inventory(object):
         if not os.path.isfile(hosts_file):
             root = os.path.join(REPO, "inventories")
             known = sorted(d for d in os.listdir(root) if os.path.isfile(os.path.join(root, d, "hosts")))
-            die("there is no inventory %r; choose one of: %s" % (env, ", ".join(known)))
+            die("there is no inventory %r; choose one of: %s. A new one starts with python3 kit setup --env %s"
+                % (env, ", ".join(k for k in known if not k.startswith("_") and k != "connected"), env))
         self.hosts = self.group_hosts(hosts_file, "registry")
         files = sorted(glob.glob(os.path.join(self.dir, "group_vars", "all", "*.yml")))
         files += sorted(glob.glob(os.path.join(self.dir, "group_vars", "registry", "*.yml")))
@@ -1316,14 +1397,15 @@ def kit_mismatches(harbor_dir, inv):
     has_binary = os.path.isfile(os.path.join(harbor_dir, "docker-compose-linux-x86_64"))
     has_rpms = {sub: bool(glob.glob(os.path.join(harbor_dir, sub, "*.rpm"))) for sub in ("podman", "docker")}
     found = []
-    if runtime == "podman" and provider == "docker-compose" and not has_binary:
-        found.append("the inventory runs Harbor with docker-compose, but this transfer has no docker-compose binary. "
-                     "Set harbor.compose_provider: docker-compose in kit.yml and fetch again, or set "
-                     "harbor_podman_compose_provider: podman-compose in %s" % inv.where("harbor_podman_compose_provider"))
-    elif runtime == "podman" and provider == "podman-compose" and not has_rpms["podman"]:
-        found.append("the inventory runs Harbor with podman-compose, but this transfer has no podman-compose RPMs. "
-                     "Set harbor.compose_provider: podman-compose in kit.yml and fetch again, or set "
-                     "harbor_podman_compose_provider: docker-compose in %s" % inv.where("harbor_podman_compose_provider"))
+    carries = {"docker-compose": has_binary, "podman-compose": has_rpms["podman"]}
+    other = "podman-compose" if provider == "docker-compose" else "docker-compose"
+    if runtime == "podman" and provider in carries and not carries[provider]:
+        if carries[other]:
+            found.append("the inventory runs Harbor with %s, but this transfer carries %s. python3 kit setup --env %s "
+                         "switches the inventory to %s" % (provider, other, inv.env, other))
+        else:
+            found.append("the inventory runs Harbor with %s, but this transfer doesn't carry it. On the connected "
+                         "workstation, set harbor.compose_provider: %s in kit.yml and fetch again" % (provider, provider))
     if runtime == "docker" and inv.literal("docker_offline_source", "yum") == "staged" and not has_rpms["docker"]:
         found.append("the inventory installs Docker CE from the transfer (docker_offline_source: staged), but this transfer "
                      "has no Docker RPMs. Set docker_ce.enabled: true in kit.yml and fetch again, or set "
@@ -1332,16 +1414,51 @@ def kit_mismatches(harbor_dir, inv):
     return found
 
 
-def cmd_verify(args):
-    root = os.path.abspath(os.path.expanduser(args.from_dir))
-    step("Checking %s" % root)
-    verify_dir(root)
+def repo_version():
+    try:
+        with open(os.path.join(REPO, "VERSION"), encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def carried_version(root):
+    """The VERSION in the copy of the repository a transfer carries, and that tarball."""
+    for tarball in sorted(glob.glob(os.path.join(root, "repo", "*.tar.gz"))):
+        try:
+            with tarfile.open(tarball) as tar:
+                for member in tar:
+                    if member.isfile() and re.match(r"^[^/]+/VERSION$", member.name):
+                        return tar.extractfile(member).read().decode("utf-8", "replace").strip(), tarball
+        except (OSError, tarfile.TarError):
+            continue
+    return "", None
+
+
+def warn_if_older_than_transfer(root):
+    """A transfer from a newer kit can expect playbooks, inventory settings or checks this copy
+    doesn't have, and the failures that follow don't say so. Say it up front."""
+    carried, tarball = carried_version(root)
+    mine = repo_version()
+    if not carried or not mine or version_key(carried) <= version_key(mine):
+        return
+    name = os.path.basename(tarball)[:-len(".tar.gz")]
+    parent = os.path.dirname(REPO)
+    log("WARNING: this repository is %s, but the transfer carries %s. Update it from the transfer" % (mine, carried))
+    if os.path.basename(REPO) == name:
+        log("(this keeps your inventories), check the CHANGELOG for inventory changes, and run publish again:")
+        log("    tar -xzf %s -C %s --exclude=%s/inventories" % (tarball, parent, name))
+    else:
+        log("next to this copy, bring your inventory values and vault across, and run publish again from it:")
+        log("    tar -xzf %s -C %s" % (tarball, parent))
+        log("    cd %s" % os.path.join(parent, name))
 
 
 def cmd_publish(args):
     root = os.path.abspath(os.path.expanduser(args.from_dir))
     step("Checking the transfer")
     sums = verify_dir(root)
+    warn_if_older_than_transfer(root)
     inv = Inventory(args.env)
     staging = os.path.abspath(args.staging or inv.literal("artifact_staging") or "/var/staging/artifacts")
     ensure_staging(staging)
@@ -1396,9 +1513,10 @@ def cmd_publish(args):
         log("%d files staged and checked" % checked)
 
     step("Next")
-    print("    make build-registry ENV=%s" % args.env)
+    print("    python3 kit setup --env %s     the first time, or to change anything" % args.env)
+    print("    python3 kit build --env %s" % args.env)
     if os.path.isdir(os.path.join(root, "broadcom")):
-        print("    python3 kit load --env %s" % args.env)
+        print("    python3 kit load  --env %s" % args.env)
 
 
 def cmd_load(args):
@@ -1422,8 +1540,8 @@ def cmd_load(args):
     carried = {(b.get("item"), b.get("version")) for b in bundles if b.get("item")}
     absent = ["%s %s" % (key, v) for key, versions in choices.items() for v in versions if (key, v) not in carried]
     if absent:
-        die("%s turns on %s, which this transfer doesn't carry. Turn the same on for %s on the connected "
-            "side, run python3 kit fetch, and bring that transfer in" % (inv.where("broadcom_items"), ", ".join(absent), args.env))
+        die("%s turns on %s, which this transfer doesn't carry. On the connected workstation, python3 kit choose "
+            "--env %s, then python3 kit fetch, and bring that transfer in" % (args.env, ", ".join(absent), args.env))
     selected = [b for b in bundles if not b.get("item") or b.get("version") in choices.get(b["item"], [])]
     skipped = sorted({"%s %s" % (b["item"], b["version"]) for b in bundles if b not in selected})
 
@@ -1435,8 +1553,8 @@ def cmd_load(args):
         projects.add(project.get("name") if isinstance(project, dict) else str(project))
     missing = sorted({b["project"] for b in selected} - projects)
     if missing and not args.registry:
-        die("Harbor project(s) %s are not in harbor_projects in %s: add them and run make build-registry first"
-            % (", ".join(missing), inv.where("harbor_projects")))
+        die("Harbor project(s) %s are not in harbor_projects in %s: add them and run python3 kit build --env %s first"
+            % (", ".join(missing), inv.where("harbor_projects"), args.env))
     if not selected:
         log("Nothing in this transfer is for %s%s" % (args.env, " (it carries %s for other environments)" % ", ".join(skipped) if skipped else ""))
         return
@@ -1463,7 +1581,7 @@ def cmd_load(args):
             cmd += ["--registry-ca-cert-path", ca]
         code, _ = run(cmd + imgpkg_extra_args(), env=env)
         if code:
-            die("imgpkg could not push %s to %s (see above). If its project is new, run make build-registry ENV=%s first"
+            die("imgpkg could not push %s to %s (see above). If its project is new, run python3 kit build --env %s first"
                 % (b["tar"], repo, args.env), 2)
         b["target"] = repo + (":" + b["tag"] if b["tag"] else "@" + b["digest"])
         row("OK", "%s %s" % (b["item"], b["version"]) if b.get("item") else b["ref"], "-> " + b["target"])
@@ -1518,11 +1636,1369 @@ def cmd_load(args):
     step("Done")
 
 
-def cmd_catalog(args):
+# --- inside: setup, the checks before a run, and the playbooks -----------------------------
+
+ANSIBLE_MIN = (2, 14)
+PLACEHOLDER = re.compile(r"CHANGE_ME|REPLACE")
+
+
+def this_machine():
+    """Every name and address this machine answers to, in lower case."""
+    names = {"localhost", "127.0.0.1", "::1", socket.gethostname(), socket.getfqdn()}
+    try:
+        names |= set(socket.gethostbyname_ex(socket.gethostname())[2])
+    except OSError:
+        pass
+    try:
+        names |= set(subprocess.run(["hostname", "-I"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    universal_newlines=True).stdout.split())
+    except OSError:
+        pass
+    return {name.lower() for name in names if name}
+
+
+def quiet(cmd, timeout=30):
+    """Run a command without showing it: (exit code, stdout and stderr together)."""
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
+                              timeout=timeout)
+        return proc.returncode, proc.stdout
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return 127, str(error)
+
+
+def is_hostname(text):
+    return bool(re.match(r"^(?=.{1,253}$)([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$", text))
+
+
+def is_address(text):
+    try:
+        socket.inet_pton(socket.AF_INET6 if ":" in text else socket.AF_INET, text)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def resolves(name):
+    try:
+        socket.getaddrinfo(name, None)
+        return True
+    except OSError:
+        return False
+
+
+def yaml_scalar(value):
+    """A value as YAML would read it back unchanged: plain when that's safe, quoted otherwise."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, list):
+        return "[%s]" % ", ".join(yaml_scalar(str(v)) for v in value)
+    text = str(value)
+    if (re.match(r"^[A-Za-z][A-Za-z0-9_./@-]*$", text) or re.match(r"^/[A-Za-z0-9_./-]*$", text)) and \
+            text.lower() not in ("true", "false", "yes", "no", "on", "off", "null", "y", "n"):
+        return text
+    return '"%s"' % text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+class InventoryEdit(object):
+    """Changes to an inventory's files, made in memory and saved together. Each setting keeps its
+    line, spacing and comment; a commented-out line for it is used before anything is appended."""
+
+    def __init__(self, inv):
+        self.inv = inv
+        self.files = {}
+        self.changed = []           # (file, setting, before, after)
+
+    def _lines(self, rel):
+        if rel not in self.files:
+            path = os.path.join(self.inv.dir, rel)
+            with open(path, encoding="utf-8") as handle:
+                self.files[rel] = handle.read().splitlines(True)
+        return self.files[rel]
+
+    def set(self, rel, name, value):
+        lines = self._lines(rel)
+        text = yaml_scalar(value)
+        rx = re.compile(r"^(#\s*)?(%s:)([ \t]*)([^#\n]*?)([ \t]*#.*)?$" % re.escape(name))
+        active = commented = None
+        for i, line in enumerate(lines):
+            match = rx.match(line.rstrip("\n"))
+            if match and not match.group(1) and active is None:
+                active = (i, match)
+            elif match and match.group(1) and commented is None:
+                commented = (i, match)
+        i, match = active or commented or (None, None)
+        if match is None:
+            if lines and not lines[-1].endswith("\n"):
+                lines[-1] += "\n"
+            lines.append("%s: %s\n" % (name, text))
+            before = None
+        else:
+            before = None if match.group(1) else match.group(4).strip()
+            if before == text:
+                return
+            lines[i] = "%s%s%s%s\n" % (match.group(2), match.group(3) or " ", text, match.group(5) or "")
+        self.changed.append((rel, name, before, text))
+
+    def unset(self, rel, name):
+        """Comment a setting out, so its line and its explanation stay in the file."""
+        lines = self._lines(rel)
+        for i, line in enumerate(lines):
+            if re.match(r"^%s:" % re.escape(name), line):
+                lines[i] = "# " + line
+                self.changed.append((rel, name, line.split(":", 1)[1].split("#")[0].strip(), None))
+                return
+
+    def item(self, rel, key, value):
+        """One entry under broadcom_items:, set to false, a version, or a list of versions."""
+        lines = self._lines(rel)
+        text = yaml_scalar(value)
+        start = next((i for i, line in enumerate(lines) if re.match(r"^broadcom_items:", line)), None)
+        if start is None:
+            lines.append("broadcom_items:\n")
+            start = len(lines) - 1
+        end = next((i for i in range(start + 1, len(lines)) if re.match(r"^[^\s#]", lines[i])), len(lines))
+        for i in range(start + 1, end):
+            match = re.match(r"^(\s+%s:)([ \t]*)([^#\n]*?)([ \t]*#.*)?$" % re.escape(key), lines[i].rstrip("\n"))
+            if match:
+                before = match.group(3).strip()
+                if before != text:
+                    lines[i] = "%s%s%s%s\n" % (match.group(1), match.group(2) or " ", text, match.group(4) or "")
+                    self.changed.append((rel, "broadcom_items." + key, before, text))
+                return
+        last = max(i for i in range(start, end) if lines[i].strip()) + 1
+        lines.insert(last, "  %s: %s\n" % (key, text))
+        self.changed.append((rel, "broadcom_items." + key, None, text))
+
+    def rename_host(self, old, new):
+        lines = self._lines("hosts")
+        group = None
+        for i, line in enumerate(lines):
+            stripped = re.split(r"[#;]", line, maxsplit=1)[0].strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                group = stripped[1:-1]
+            elif group == "registry" and stripped.split() and stripped.split()[0] == old:
+                lines[i] = line.replace(old, new, 1)
+                self.changed.append(("hosts", "[registry]", old, new))
+                return
+
+    def save(self):
+        for rel, lines in self.files.items():
+            path = os.path.join(self.inv.dir, rel)
+            tmp = path + ".new"
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write("".join(lines))
+            os.replace(tmp, path)
+
+
+def ask_value(question, default="", check=None):
+    """A line of text at the terminal. Enter takes the default; check returns a problem or None."""
+    while True:
+        try:
+            answer = input("    %s%s: " % (question, " [%s]" % default if default else "")).strip()
+        except EOFError:
+            print("")
+            die("stopped: no answer")
+        answer = answer or default
+        problem = check(answer) if check else (None if answer else "an answer is needed")
+        if not problem:
+            return answer
+        print("      %s" % problem)
+
+
+def ask_secret(question, check=None, generate=False):
+    while True:
+        try:
+            first = getpass.getpass("    %s%s: " % (question, " (Enter to generate one)" if generate else ""))
+            again = None
+        except EOFError:
+            print("")
+            die("stopped: no answer")
+        if not first and generate:
+            alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+            return "".join(alphabet[b % len(alphabet)] for b in os.urandom(24)) + "A7a"
+        problem = check(first) if check else None
+        if problem:
+            print("      %s" % problem)
+            continue
+        try:
+            again = getpass.getpass("    The same again: ")
+        except EOFError:
+            print("")
+            die("stopped: no answer")
+        if again == first:
+            return first
+        print("      They didn't match.")
+
+
+def harbor_password_problem(text):
+    if len(text) < 8 or not re.search(r"[A-Z]", text) or not re.search(r"[a-z]", text) or not re.search(r"[0-9]", text):
+        return "Harbor needs 8 or more characters, with an upper-case letter, a lower-case letter and a number."
+    return None
+
+
+def cert_problems(cert, key, ca, name):
+    """What's wrong with a certificate, its key and its CA for this registry name: (problems, notes)."""
+    problems, notes = [], []
+    if not shutil.which("openssl"):
+        return problems, ["openssl isn't installed here, so the certificate wasn't checked"]
+    code, text = quiet(["openssl", "x509", "-in", cert, "-noout", "-text"])
+    if code:
+        return ["%s isn't a PEM certificate" % cert], notes
+    san = re.search(r"X509v3 Subject Alternative Name:[^\n]*\n\s*([^\n]+)", text)
+    sans = re.findall(r"DNS:([^,\s]+)", san.group(1)) if san else []
+    if re.search(r"CA:TRUE", text):
+        problems.append("it's a CA's certificate, not the registry's")
+    elif not any(n.lower() == name.lower() or (n.startswith("*.") and name.lower().endswith(n[1:].lower())
+                                               and name.count(".") == n.count(".")) for n in sans):
+        problems.append("it's for %s, not %s" % (", ".join(sans), name) if sans else
+                        "it has no DNS name in its Subject Alternative Name, which the Supervisor and VKS need")
+    if quiet(["openssl", "x509", "-in", cert, "-noout", "-checkend", "0"])[0]:
+        problems.append("it has expired")
+    elif quiet(["openssl", "x509", "-in", cert, "-noout", "-checkend", str(30 * 86400)])[0]:
+        notes.append("it expires within 30 days")
+    if key:
+        mine = quiet(["openssl", "x509", "-in", cert, "-noout", "-pubkey"])
+        theirs = quiet(["openssl", "pkey", "-in", key, "-pubout"])
+        if theirs[0]:
+            problems.append("%s isn't a private key openssl can read (is it encrypted?)" % key)
+        elif mine[1].strip() != theirs[1].strip():
+            problems.append("%s isn't the key for this certificate" % key)
+    if ca and quiet(["openssl", "verify", "-CAfile", ca, cert])[0]:
+        problems.append("%s didn't issue it (openssl verify fails)" % ca)
+    return problems, notes
+
+
+def staged_tls(inv, staging, name):
+    """Where the build reads the staged certificate, key and CA: harbor_tls_staged_cert, _key and _ca,
+    which default to <artifact_staging>/tls/. The CA is "" when the server already trusts it."""
+    return [inv.literal("harbor_tls_staged_cert") or os.path.join(staging, "tls", name + ".crt"),
+            inv.literal("harbor_tls_staged_key") or os.path.join(staging, "tls", name + ".key"),
+            inv.literal("harbor_tls_staged_ca", os.path.join(staging, "tls", "ca.crt"))]
+
+
+def vault_state(inv):
+    path = os.path.join(inv.dir, "group_vars", "all", "vault.yml")
+    if not os.path.isfile(path):
+        return path, None
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        return path, handle.read().lstrip().startswith("$ANSIBLE_VAULT")
+
+
+def vault_args(inv):
+    path, encrypted = vault_state(inv)
+    if os.path.isfile(os.path.join(REPO, ".vault_pass")):
+        return ["--vault-password-file", os.path.join(REPO, ".vault_pass")]
+    return ["--ask-vault-pass"] if encrypted else []
+
+
+def show_changes(edit):
+    for rel, setting, before, after in edit.changed:
+        row("", "%s: %s" % (rel, setting), "%s -> %s" % (before if before is not None else "(not set)",
+                                                        after if after is not None else "(commented out)"), width=50)
+
+
+def not_carried(inv, catalog, bdir):
+    """The items and versions an environment turns on that the transfer staged in bdir doesn't carry;
+    None when no transfer is staged there."""
+    manifest = os.path.join(bdir, "bundles.json")
+    if not os.path.isfile(manifest):
+        return None
+    with open(manifest) as handle:
+        carried = {(b.get("item"), b.get("version")) for b in json.load(handle) if b.get("item")}
+    choices, _ = wanted_items(inv, catalog)
+    return ["%s %s" % (key, v) for key, versions in choices.items() for v in versions if (key, v) not in carried]
+
+
+def cmd_choose(args):
+    if not interactive():
+        die("python3 kit choose asks questions, so it needs a terminal")
+    inv = Inventory(args.env)
     catalog = load_catalog(repo_path("broadcom/catalog.yml"))
     if not catalog:
+        die("broadcom/catalog.yml lists nothing to choose from")
+    edit = InventoryEdit(inv)
+    step("What %s gets from Broadcom. Enter keeps what's in brackets." % args.env)
+    choose_items(inv, edit, catalog)
+    step("Changes")
+    if not edit.changed:
+        row("OK", "nothing to change")
+    else:
+        show_changes(edit)
+        if not ask("Save these?", True):
+            die("nothing was saved")
+        edit.save()
+    envs = load_config(args.config)["broadcom"]["environments"]
+    step("Next")
+    if envs != "all" and args.env not in envs:
+        row("WARN", "kit.yml's broadcom.environments leaves out %s, so a fetch won't carry its items" % args.env)
+    print("    python3 kit check")
+    print("    python3 kit fetch     carries what every environment has chosen")
+
+
+def choose_items(inv, edit, catalog):
+    """Ask which catalog items an environment gets, and at which versions; the answers go into edit."""
+    raw = inv.vars.get("broadcom_items") if isinstance(inv.vars.get("broadcom_items"), dict) else {}
+    print("")
+    print("    Broadcom content for this environment:")
+    keys = list(catalog)
+    on = []
+    for n, key in enumerate(keys, 1):
+        value = raw.get(key)
+        now = (", ".join(pinned(value)) if pinned(value) else catalog[key]["default"] if value is True else "")
+        if now:
+            on.append(str(n))
+        print("      %2d  %-30s %s" % (n, key, "on: " + now if now else ""))
+
+    def numbers_problem(text):
+        if text == "none":
+            return None
+        bad = [t for t in text.replace(",", " ").split() if not t.isdigit() or not 1 <= int(t) <= len(keys)]
+        return "numbers from the list, separated by spaces, or none" if bad else None
+    picked = ask_value("Which should it have? Numbers separated by spaces, or none", " ".join(on) or "none",
+                       numbers_problem)
+    chosen = [] if picked == "none" else [keys[int(t) - 1] for t in picked.replace(",", " ").split()]
+    rel_items = os.path.relpath(os.path.join(REPO, inv.where("broadcom_items")), inv.dir)
+    for key in keys:
+        if key not in chosen:
+            if raw.get(key) not in (None, False):
+                edit.item(rel_items, key, False)
+            continue
+        versions = list(catalog[key]["versions"])
+        current = "default" if raw.get(key) is True else " ".join(pinned(raw.get(key)) or [catalog[key]["default"]])
+
+        def version_problem(text, versions=versions):
+            if text == "default":
+                return None
+            missing = [v for v in text.replace(",", " ").split() if v not in versions]
+            return ("not in the catalog: %s (it has %s)" % (", ".join(missing), ", ".join(versions[:8])
+                    + (", ..." if len(versions) > 8 else ""))) if missing else None
+        answer = ask_value("%s version (newest %s; default follows the catalog)" % (key, versions[0]),
+                           current, version_problem).replace(",", " ").split()
+        edit.item(rel_items, key, True if answer == ["default"] else answer[0] if len(answer) == 1 else answer)
+
+
+def change_vault(path, nexus):
+    """What changed in an existing vault: (every value it holds, with the changes, or None when nothing
+    changed; the password file that opened it, so the new one is encrypted with the same password)."""
+    if not shutil.which("ansible-vault"):
+        die("ansible-vault isn't installed. Install ansible-core %d.%d or later: sudo dnf install ansible-core"
+            % ANSIBLE_MIN)
+    pw_file = os.path.join(REPO, ".vault_pass")
+    if not os.path.isfile(pw_file):
+        temp_dir = tempfile.mkdtemp(prefix="kit-vault-")
+        atexit.register(shutil.rmtree, temp_dir, True)
+        pw_file = os.path.join(temp_dir, "password")
+        try:
+            secret = getpass.getpass("    The vault's password: ")
+        except EOFError:
+            print("")
+            die("stopped: no answer")
+        with os.fdopen(os.open(pw_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as handle:
+            handle.write(secret + "\n")
+    opened = subprocess.run(["ansible-vault", "view", "--vault-password-file", pw_file, path], cwd=REPO,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    if opened.returncode:
+        die("ansible-vault couldn't open the vault with that password, so nothing was changed")
+    try:
+        before = parse_yaml(opened.stdout, "vault.yml")
+    except KitError:
+        before = None
+    if not isinstance(before, dict):
+        die("the vault opened, but it isn't a list of passwords, so nothing was changed")
+    before = dict((k, "" if v is None else str(v)) for k, v in before.items())
+    values = dict(before)
+    print("    Harbor's database password stays: its database keeps the one Harbor was built with.")
+    if ask("Has Harbor's admin password been changed in the Harbor portal?", False):
+        values["vault_harbor_admin_password"] = ask_secret("The new one, exactly as in the portal",
+                                                           harbor_password_problem)
+    if nexus:
+        user = values.get("vault_repo_username", "")
+        if ask("Does Nexus need a login to read the Harbor files?", bool(user)):
+            values["vault_repo_username"] = ask_value("Nexus account", user)
+            if values["vault_repo_username"] != user or not values.get("vault_repo_password") \
+                    or not ask("Keep its password?", True):
+                values["vault_repo_password"] = ask_secret("Its password", lambda t: None if t else "it can't be empty")
+        else:
+            values["vault_repo_username"] = values["vault_repo_password"] = ""
+    return (values if values != before else None), pw_file
+
+
+def cmd_setup(args):
+    if not interactive():
+        die("python3 kit setup asks questions, so it needs a terminal")
+    new_dir = os.path.join(REPO, "inventories", args.env)
+    if not os.path.isfile(os.path.join(new_dir, "hosts")):
+        template = os.path.join(REPO, "inventories", "_template")
+        if not re.match(r"^[a-z0-9][a-z0-9._-]*$", args.env):
+            die("%r can't be an environment's name: use lowercase letters, digits, dots, dashes and underscores" % args.env)
+        if os.path.exists(new_dir) or not os.path.isfile(os.path.join(template, "hosts")):
+            Inventory(args.env)         # says which inventories there are
+        if not ask("There's no inventories/%s yet. Start it from inventories/_template?" % args.env, True):
+            die("nothing was created")
+        shutil.copytree(template, new_dir, ignore=shutil.ignore_patterns("vault.yml", "*.previous"))
+        row("OK", "inventories/%s, from the template" % args.env)
+    inv = Inventory(args.env)
+    rel_dir = os.path.relpath(inv.dir, REPO)
+    edit = InventoryEdit(inv)
+    step("Setting up %s. Enter keeps what's in brackets." % rel_dir)
+
+    # The name under [registry] is only a label; its settings live in host_vars/<label>.yml.
+    if len(inv.hosts) != 1:
+        die("%s/hosts should list one server under [registry]; it lists %d" % (rel_dir, len(inv.hosts)))
+    label = inv.hosts[0]
+    hv_dir = os.path.join(inv.dir, "host_vars")
+    if not os.path.isfile(os.path.join(hv_dir, label + ".yml")):
+        others = sorted(f[:-4] for f in os.listdir(hv_dir) if f.endswith(".yml")) if os.path.isdir(hv_dir) else []
+        if len(others) == 1 and ask("hosts calls the registry %s, but its settings are in host_vars/%s.yml. Call it %s "
+                                    "in hosts, so they apply?" % (label, others[0], others[0]), True):
+            edit.rename_host(label, others[0])
+            edit.save()
+            row("OK", "hosts now calls the registry %s" % others[0])
+            inv = Inventory(args.env)
+            edit = InventoryEdit(inv)
+            label = others[0]
+        else:
+            template = os.path.join(REPO, "inventories", "_template", "host_vars", "registry01.yml")
+            if not os.path.isfile(template):
+                die("there's no host_vars/%s.yml in %s and no template to start it from" % (label, rel_dir))
+            os.makedirs(hv_dir, exist_ok=True)
+            shutil.copyfile(template, os.path.join(hv_dir, label + ".yml"))
+            inv = Inventory(args.env)
+            edit = InventoryEdit(inv)
+    hv = "host_vars/%s.yml" % label
+
+    print("")
+    me = socket.getfqdn()
+    if me.startswith("localhost"):
+        me = socket.gethostname()
+    machine = this_machine()
+    fqdn = inv.literal("registry_server_fqdn", "")
+    known = fqdn if fqdn and not PLACEHOLDER.search(fqdn) else ""
+    here = ask("Does Harbor run on this machine (%s), the one you run kit from?" % me,
+               str(inv.vars.get("ansible_connection", "")) == "local" or (known.lower() in machine if known else False))
+    if here:
+        edit.set(hv, "registry_server_fqdn", known if known.lower() in machine else me)
+        edit.set(hv, "ansible_connection", "local")
+    else:
+        def server_problem(text):
+            if PLACEHOLDER.search(text) or not (is_hostname(text) or is_address(text)):
+                return "a server name like registry01.example.com, or its address"
+            if text.lower() in machine:
+                return "that's this machine; answer yes to the question before instead"
+            return None
+        server = ask_value("The registry server's name", known if known.lower() not in machine else "", server_problem)
+        while not resolves(server) and not ask("%s doesn't resolve from here. Use it anyway?" % server, False):
+            server = ask_value("The registry server's name", "", server_problem)
+        edit.set(hv, "registry_server_fqdn", server)
+        edit.unset(hv, "ansible_connection")
+        user = ask_value("The account Ansible logs in with", inv.literal("ansible_user") or getpass.getuser(),
+                         lambda t: None if re.match(r"^[a-z_][a-z0-9_.-]*\$?$", t) else "a Linux account name")
+        if user != getpass.getuser() or inv.vars.get("ansible_user"):
+            edit.set(hv, "ansible_user", user)
+
+    name_now = inv.literal("harbor_hostname", "")
+    name = ask_value("The registry's DNS name, the one the Supervisor and VKS use",
+                     name_now if name_now and not PLACEHOLDER.search(name_now) else "",
+                     lambda t: None if is_hostname(t) and "." in t and not PLACEHOLDER.search(t)
+                     else "a DNS name like registry.example.com")
+    if not resolves(name):
+        print("      %s doesn't resolve yet. Give it a DNS record before the Supervisor uses it." % name)
+    edit.set(hv, "harbor_hostname", name)
+
+    volume = ask_value("Where Harbor keeps its images", inv.literal("harbor_data_volume", "/data"),
+                       lambda t: None if t.startswith("/") and " " not in t else "an absolute path like /data")
+    edit.set(hv, "harbor_data_volume", volume)
+    edit.set("group_vars/registry/main.yml", "harbor_data_require_mount",
+             ask("Stop the build unless %s is its own disk?" % volume,
+                 str(inv.vars.get("harbor_data_require_mount", False)).lower() == "true"))
+
+    print("")
+    mode = inv.literal("harbor_tls_mode", "staged")
+    ipa = ask("Does IdM issue the registry's certificate? (No: you have a certificate, key and CA from any CA)",
+              mode == "ipa")
+    edit.set("group_vars/registry/main.yml", "harbor_tls_mode", "ipa" if ipa else "staged")
+    staging = inv.literal("artifact_staging", "/var/staging/artifacts")
+    staged = staged_tls(inv, staging, name)
+    tls = os.path.dirname(staged[0])
+    cert_files = None
+    if ipa:
+        if here and not os.path.isfile("/etc/ipa/default.conf"):
+            print("      This machine isn't an IdM client, so IdM can't issue it here. Answer no instead.")
+    elif all(os.path.isfile(p) for p in staged if p) and not cert_problems(staged[0], staged[1], staged[2], name)[0] \
+            and ask("A certificate for %s is already staged in %s. Keep it?" % (name, tls), True):
+        pass
+    else:
+        def file_problem(text):
+            return None if text == "skip" or os.path.isfile(os.path.expanduser(text)) else "no such file (or type skip)"
+        cert = os.path.expanduser(ask_value("The certificate file for %s (PEM; skip to do it later)" % name, "", file_problem))
+        if cert != "skip":
+            key = os.path.expanduser(ask_value("Its private key file", "", file_problem))
+            ca = os.path.expanduser(ask_value("The CA certificate that issued it", "", file_problem))
+            problems, notes = cert_problems(cert, key, ca, name)
+            for line in problems + notes:
+                print("      %s" % line)
+            if not problems or ask("Stage it anyway?", False):
+                cert_files = (cert, key, ca)
+
+    print("")
+    nexus = ask("Keep the Harbor files in a Nexus as well? Most environments don't.",
+                inv.vars.get("nexus_enabled") is True)
+    edit.set("group_vars/all/artifacts.yml", "nexus_enabled", nexus)
+    if nexus:
+        url = inv.literal("nexus_url", "")
+        edit.set("group_vars/all/artifacts.yml", "nexus_url",
+                 ask_value("The Nexus URL", url if url and not PLACEHOLDER.search(url) else "",
+                           lambda t: None if re.match(r"^https?://[^\s/]+", t) and not PLACEHOLDER.search(t)
+                           else "a URL like https://nexus.example.com"))
+
+    catalog = load_catalog(repo_path("broadcom/catalog.yml"))
+    if catalog:
+        choose_items(inv, edit, catalog)
+
+    # The compose provider follows what the staged transfer carries; there's nothing to ask.
+    harbor_dir = os.path.join(staging, "harbor")
+    if inv.literal("harbor_container_runtime", "podman") == "podman" and os.path.isdir(harbor_dir):
+        has_binary = os.path.isfile(os.path.join(harbor_dir, "docker-compose-linux-x86_64"))
+        has_rpms = bool(glob.glob(os.path.join(harbor_dir, "podman", "*.rpm")))
+        carried = "docker-compose" if has_binary and not has_rpms else "podman-compose" if has_rpms and not has_binary else None
+        if carried and carried != inv.literal("harbor_podman_compose_provider", "podman-compose"):
+            rel = os.path.relpath(os.path.join(REPO, inv.where("harbor_podman_compose_provider")), inv.dir)
+            edit.set(rel, "harbor_podman_compose_provider", carried)
+            print("")
+            print("    The staged transfer carries %s, so Harbor will run with it." % carried)
+
+    print("")
+    vault, encrypted = vault_state(inv)
+    vault_secrets, vault_pw_file = None, None
+    if encrypted:
+        if not ask("The vault is there and encrypted. Keep its passwords as they are?", True):
+            vault_secrets, vault_pw_file = change_vault(vault, nexus)
+    else:
+        if encrypted is False:
+            print("    group_vars/all/vault.yml is there but not encrypted. Setup replaces it with an encrypted one.")
+        vault_secrets = {
+            "vault_harbor_admin_password": ask_secret("Harbor's admin password", harbor_password_problem),
+            "vault_harbor_db_password": ask_secret("Harbor's database password", harbor_password_problem, generate=True),
+            "vault_repo_username": "", "vault_repo_password": ""}
+        if nexus and ask("Does Nexus need a login to read the Harbor files?", False):
+            vault_secrets["vault_repo_username"] = ask_value("Nexus account")
+            vault_secrets["vault_repo_password"] = ask_secret("Its password", lambda t: None if t else "it can't be empty")
+
+    step("Changes")
+    if not edit.changed and not cert_files and not vault_secrets:
+        row("OK", "nothing to change")
+    show_changes(edit)
+    if cert_files:
+        row("", "certificate, key and CA", "-> %s" % tls, width=50)
+    if vault_secrets:
+        row("", "group_vars/all/vault.yml", "updated, same vault password" if vault_pw_file
+            else "created and encrypted", width=50)
+    if (edit.changed or cert_files or vault_secrets) and not ask("Save these?", True):
+        die("nothing was saved")
+    edit.save()
+
+    if cert_files:
+        ensure_staging(staging)
+        for src, dest, mode_bits in zip(cert_files, staged, (0o644, 0o600, 0o644)):
+            if not dest:
+                continue
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.copyfile(src, dest)
+            os.chmod(dest, mode_bits)
+        row("OK", "staged the certificate in %s" % tls)
+    if vault_secrets:
+        if not shutil.which("ansible-vault"):
+            die("ansible-vault isn't installed. Install ansible-core 2.14 or later (sudo dnf install ansible-core), "
+                "then run python3 kit setup --env %s again" % args.env)
+        tmp = vault + ".new"
+        old_umask = os.umask(0o077)
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write("---\n# Harbor's passwords for %s, written by python3 kit setup.\n" % args.env)
+                for key, value in vault_secrets.items():
+                    handle.write("%s: %s\n" % (key, yaml_scalar(value) if value else '""'))
+        finally:
+            os.umask(old_umask)
+        pw_file = vault_pw_file or (os.path.join(REPO, ".vault_pass")
+                                    if os.path.isfile(os.path.join(REPO, ".vault_pass")) else None)
+        cmd = ["ansible-vault", "encrypt", tmp] + (["--vault-password-file", pw_file] if pw_file else [])
+        if not pw_file:
+            print("    Choose the vault password. Keep it somewhere safe: every build asks for it.")
+        if subprocess.call(cmd) != 0:
+            os.remove(tmp)
+            die("the vault wasn't encrypted, so it wasn't saved. Run python3 kit setup --env %s again" % args.env)
+        os.replace(tmp, vault)
+        row("OK", "%s/group_vars/all/vault.yml, encrypted" % rel_dir)
+
+    if catalog:
+        absent = not_carried(Inventory(args.env), catalog, os.path.join(staging, "broadcom"))
+        if absent:
+            row("WARN", "the staged transfer doesn't carry %s" % ", ".join(absent))
+            print("          Choose it on the connected workstation (python3 kit choose --env %s), fetch, and bring "
+                  "that transfer in. kit load stops until then." % args.env)
+    problems, _ = preflight_env(args.env, "build")
+    step("Next")
+    if problems:
+        print("    Fix what's above, then: python3 kit build --env %s" % args.env)
+    else:
+        print("    python3 kit build --env %s" % args.env)
+
+
+class Checks(object):
+    def __init__(self):
+        self.problems = 0
+
+    def ok(self, label, detail=""):
+        row("OK", label, detail)
+
+    def warn(self, label, detail=""):
+        row("WARN", label, detail)
+
+    def fail(self, label, fix):
+        row("FAIL", label)
+        print("          %s" % fix)
+        self.problems += 1
+
+
+def preflight_env(env, purpose):
+    """Everything that would stop a playbook, checked before it starts: (problems, extra arguments)."""
+    checks = Checks()
+    inv = Inventory(env)
+    setup = "python3 kit setup --env %s" % env
+    step("Checking %s before the %s" % (os.path.relpath(inv.dir, REPO), purpose))
+
+    apb = shutil.which("ansible-playbook")
+    if not apb:
+        checks.fail("ansible-playbook isn't installed", "Install ansible-core %d.%d or later: sudo dnf install ansible-core" % ANSIBLE_MIN)
+    else:
+        found = re.search(r"core (\d+)\.(\d+)", quiet([apb, "--version"])[1])
+        have = tuple(int(n) for n in found.groups()) if found else ()
+        if have and have < ANSIBLE_MIN:
+            checks.fail("ansible-core %d.%d is too old" % have, "Install %d.%d or later" % ANSIBLE_MIN)
+        else:
+            checks.ok("ansible-core %s" % ".".join(str(n) for n in have) if have else "ansible-playbook", apb)
+
+    if not inv.hosts:
+        checks.fail("hosts has no server under [registry]", setup)
+        return checks.problems, []
+    label = inv.hosts[0]
+    hv_dir = os.path.join(inv.dir, "host_vars")
+    if not os.path.isfile(os.path.join(hv_dir, label + ".yml")):
+        others = sorted(f[:-4] for f in os.listdir(hv_dir) if f.endswith(".yml")) if os.path.isdir(hv_dir) else []
+        checks.fail("hosts calls the registry %s, but there's no host_vars/%s.yml%s" % (
+            label, label, " (the settings are in host_vars/%s.yml)" % others[0] if others else ""),
+            "%s fixes it" % setup)
+        return checks.problems, []
+    for name in ("registry_server_fqdn", "harbor_hostname"):
+        value = inv.literal(name, "")
+        if not value or PLACEHOLDER.search(value):
+            checks.fail("%s isn't set" % name, setup)
+    if checks.problems:
+        return checks.problems, []
+
+    target = (inv.literal("ansible_host") or inv.literal("registry_server_fqdn") or label).lower()
+    local = str(inv.vars.get("ansible_connection", "")) == "local"
+    mine = target in this_machine()
+    extra = []
+    if mine and not local:
+        checks.fail("%s is this machine, but Ansible would log in to it over SSH" % target,
+                    "%s, and answer yes to running Harbor on this machine" % setup)
+    elif local and not mine:
+        checks.fail("ansible_connection is local, but %s isn't this machine" % target,
+                    "%s, and answer no to running Harbor on this machine" % setup)
+    elif local:
+        if os.geteuid() != 0 and quiet(["sudo", "-n", "true"])[0]:
+            checks.warn("Harbor goes on this machine; sudo asks for a password", "you'll be asked for it once")
+            extra.append("--ask-become-pass")
+        else:
+            checks.ok("Harbor goes on this machine", "sudo works")
+    else:
+        user = inv.literal("ansible_user") or getpass.getuser()
+        ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "%s@%s" % (user, target)]
+        code, out = quiet(ssh + ["true"], timeout=30)
+        if code and "Host key verification failed" in out:
+            checks.fail("%s's SSH host key isn't known here yet" % target,
+                        "Run ssh %s@%s once, check the fingerprint, and answer yes" % (user, target))
+        elif code:
+            checks.fail("can't log in to %s as %s without a password" % (target, user),
+                        "Set up a key once: ssh-copy-id %s@%s" % (user, target))
+        elif quiet(ssh + ["sudo", "-n", "true"], timeout=30)[0]:
+            checks.warn("logs in to %s as %s; sudo there asks for a password" % (target, user), "you'll be asked for it once")
+            extra.append("--ask-become-pass")
+        else:
+            checks.ok("logs in to %s as %s" % (target, user), "sudo works")
+
+    vault, encrypted = vault_state(inv)
+    if encrypted is None:
+        checks.fail("there's no vault with Harbor's passwords", "%s creates it" % setup)
+    elif not encrypted:
+        checks.fail("group_vars/all/vault.yml isn't encrypted", "%s replaces it with an encrypted one" % setup)
+    else:
+        checks.ok("the vault", "encrypted")
+    extra = vault_args(inv) + extra
+
+    if purpose == "build":
+        staging = inv.literal("artifact_staging", "/var/staging/artifacts")
+        sha = inv.literal("harbor_installer_sha256", "")
+        installer = inv.literal("harbor_installer_file", "")
+        if not sha or PLACEHOLDER.search(sha):
+            checks.fail("the Harbor files aren't staged for %s yet" % env,
+                        "python3 kit publish --from <transfer folder> --env %s" % env)
+        else:
+            source = "repo" if inv.vars.get("nexus_enabled") is True else "staged"
+            if source == "staged" and installer and not os.path.isfile(os.path.join(staging, "harbor", installer)):
+                checks.fail("%s isn't in %s" % (installer, os.path.join(staging, "harbor")),
+                            "python3 kit publish --from <transfer folder> --env %s" % env)
+            else:
+                checks.ok("Harbor %s staged" % inv.literal("harbor_version", ""), os.path.join(staging, "harbor"))
+                for problem in kit_mismatches(os.path.join(staging, "harbor"), inv):
+                    checks.fail(problem.split(". ")[0], problem.split(". ", 1)[1] if ". " in problem else setup)
+        name = inv.literal("harbor_hostname", "")
+        if inv.literal("harbor_tls_mode", "staged") == "ipa":
+            if local and not os.path.isfile("/etc/ipa/default.conf"):
+                checks.fail("IdM issues the certificate, but this machine isn't an IdM client",
+                            "%s, and answer no to IdM issuing it" % setup)
+            else:
+                checks.ok("certificate", "issued by IdM during the build")
+        else:
+            staged = staged_tls(inv, staging, name)
+            tls = os.path.dirname(staged[0])
+            missing = [p for p in staged if p and not os.path.isfile(p)]
+            if missing:
+                checks.fail("the certificate isn't staged: there's no %s" % ", ".join(missing),
+                            "%s, and give it the certificate, key and CA" % setup)
+            else:
+                problems, notes = cert_problems(staged[0], staged[1], staged[2], name)
+                for problem in problems:
+                    checks.fail("the certificate for %s: %s" % (name, problem), "%s, and give it the right files" % setup)
+                for note in notes:
+                    checks.warn("the certificate for %s: %s" % (name, note))
+                if not problems:
+                    checks.ok("certificate for %s" % name, tls)
+    return checks.problems, extra
+
+
+def run_playbook(env, playbook, extra):
+    """ansible-playbook from the repository, always with its ansible.cfg, even where Ansible would
+    skip it (a world-writable folder such as /mnt/c under WSL)."""
+    cmd = ["ansible-playbook", "-i", os.path.join("inventories", env, "hosts"), "--diff"] + extra + [playbook]
+    log("$ " + " ".join(shlex.quote(c) for c in cmd))
+    return subprocess.call(cmd, cwd=REPO, env=dict(os.environ, ANSIBLE_CONFIG=os.path.join(REPO, "ansible.cfg")))
+
+
+def cmd_doctor(args):
+    problems, _ = preflight_env(args.env, "build")
+    print("")
+    if problems:
+        die("%d problem(s) above. Each line says how to fix it" % problems, 2)
+    log("Ready. Next: python3 kit build --env %s" % args.env)
+
+
+def cmd_build(args):
+    problems, extra = preflight_env(args.env, "build")
+    if problems:
+        print("")
+        die("%d problem(s) above, so nothing was changed. Each line says how to fix it" % problems, 2)
+    step("Building the registry")
+    code = run_playbook(args.env, "build_registry.yml", extra)
+    if code:
+        die("the build stopped (see above). Fix that, then run python3 kit build --env %s again" % args.env, code)
+    inv = Inventory(args.env)
+    step("Next")
+    if wanted_items(inv, load_catalog(repo_path("broadcom/catalog.yml")))[0]:
+        print("    python3 kit load   --env %s     push its Broadcom content" % args.env)
+    print("    python3 kit verify --env %s     check it any time" % args.env)
+
+
+def cmd_verify(args):
+    if args.from_dir:
+        root = os.path.abspath(os.path.expanduser(args.from_dir))
+        step("Checking %s" % root)
+        verify_dir(root)
+        return
+    if not args.env:
+        die("say what to check: --env <environment> for its registry, or --from <folder> for a transfer")
+    problems, extra = preflight_env(args.env, "check")
+    if problems:
+        die("%d problem(s) above. Each line says how to fix it" % problems, 2)
+    step("Checking the registry")
+    code = run_playbook(args.env, "verify_registry.yml", extra)
+    if code:
+        die("the registry check failed (see above)", code)
+
+
+def cmd_remove(args):
+    problems, extra = preflight_env(args.env, "removal")
+    if problems:
+        die("%d problem(s) above. Each line says how to fix it" % problems, 2)
+    inv = Inventory(args.env)
+    target, volume = inv.literal("registry_server_fqdn", ""), inv.literal("harbor_data_volume", "/data")
+    print("")
+    if not interactive():
+        die("taking Harbor off a server asks for a yes, so it needs a terminal")
+    if not ask("Take Harbor off %s? Its images in %s stay, so a build brings it back." % (target, volume), False):
+        die("nothing was changed")
+    if args.purge_data:
+        print("    --purge-data also deletes every image in %s. There's no undo." % volume)
+        if ask_value("Type the environment's name to confirm", "", lambda t: None) != args.env:
+            die("that wasn't %s, so nothing was changed" % args.env)
+        extra += ["-e", "harbor_purge_data=true"]
+    if args.keep_certificate:
+        extra += ["--skip-tags", "tls"]
+    code = run_playbook(args.env, "remove_registry.yml", extra)
+    if code:
+        die("the removal stopped (see above)", code)
+
+
+# --- catalog refresh (connected side) ----------------------------------------------------
+
+PLAIN_VERSION = r"\d+(?:\.\d+)+(?:-\d{8})?"     # 1.33.5, 3.7.0-20260924, 2025.8.19; not -rc, not latest
+PRERELEASE = re.compile(r"(?i)[-._](rc|alpha|beta|dev|pre)\.?\d*")
+
+
+class Registry(object):
+    """Anonymous reads from a registry's v2 API: its repositories and their tags."""
+
+    def __init__(self, host):
+        self.host = host
+        self.tokens = {}
+        self.cache = {}
+
+    def get(self, path, scope):
+        """One page of JSON from https://<host><path>, and the path of the next page."""
+        if "://" in path:
+            path = "/" + path.split("/", 3)[3]
+        for attempt in (1, 2):
+            headers = {"Accept": "application/json"}
+            if self.tokens.get(scope):
+                headers["Authorization"] = "Bearer " + self.tokens[scope]
+            try:
+                with urllib.request.urlopen(request("https://%s%s" % (self.host, path), headers=headers),
+                                            timeout=60) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+                    link = re.search(r"<([^>]+)>", response.headers.get("Link") or "")
+                return body, (link.group(1) if link else None)
+            except urllib.error.HTTPError as error:
+                challenge = error.headers.get("WWW-Authenticate", "") if error.headers else ""
+                params = dict(re.findall(r'(\w+)="([^"]*)"', challenge))
+                if error.code != 401 or attempt == 2 or "realm" not in params:
+                    raise
+                query = {"scope": scope}
+                if "service" in params:
+                    query["service"] = params["service"]
+                with urllib.request.urlopen(request(params["realm"] + "?" + urllib.parse.urlencode(query)),
+                                            timeout=30) as response:
+                    token = json.loads(response.read().decode("utf-8"))
+                self.tokens[scope] = token.get("token") or token.get("access_token") or ""
+        return {}, None
+
+    def pages(self, path, scope, key):
+        if path not in self.cache:
+            found, pages, next_path = [], 0, path
+            while next_path and pages < 200:
+                body, next_path = self.get(next_path, scope)
+                found += body.get(key) or []
+                pages += 1
+            self.cache[path] = found
+        return self.cache[path]
+
+    def repositories(self):
+        return self.pages("/v2/_catalog?n=1000", "registry:catalog:*", "repositories")
+
+    def tags(self, repo):
+        try:
+            return self.pages("/v2/%s/tags/list?n=1000" % repo, "repository:%s:pull" % repo, "tags")
+        except urllib.error.HTTPError as error:
+            if error.code in (403, 404):
+                return []
+            raise
+
+
+def ref_template(ref, version):
+    """A reference with its version swapped for {v}: (host, path, tag)."""
+    parts = parse_ref(ref)
+    return parts["host"], parts["path"].replace(version, "{v}"), parts["tag"].replace(version, "{v}")
+
+
+def template_regex(text):
+    """A regex for a template, with the version as group 1 (repeated if {v} appears twice)."""
+    pieces = re.escape(text).split(re.escape("{v}"))
+    body = pieces[0]
+    for n, piece in enumerate(pieces[1:]):
+        body += ("(%s)" % PLAIN_VERSION if n == 0 else r"\1") + piece
+    return re.compile("^%s$" % body)
+
+
+def catalog_groups(item):
+    """An item's versions grouped by how their first reference is named, newest naming first."""
+    groups = []
+    for version, refs in item["versions"].items():
+        host, path, tag = ref_template(refs[0], version)
+        group = next((g for g in groups if g["path"] == path), None)
+        if group is None:
+            group = {"host": host, "path": path, "tags": [], "versions": []}
+            groups.append(group)
+        group["versions"].append(version)
+        if tag not in group["tags"]:
+            group["tags"].append(tag)
+    return groups
+
+
+def refs_for(item, group, version, registry):
+    """The references a new version gets, modeled on the newest version named the same way.
+    None when the main one has no tag for it; extra images the version doesn't have are left out."""
+    base = max(group["versions"], key=version_key)
+    refs = []
+    for n, ref in enumerate(item["versions"][base]):
+        host, path_t, tag_t = ref_template(ref, base)
+        path = path_t.replace("{v}", version)
+        tags = registry.tags(path)
+        tag = tag_t.replace("{v}", version)
+        if tag not in tags:
+            close = [t for t in tags if version in t and not t.startswith("sha256-") and not PRERELEASE.search(t)]
+            if not close:
+                if n == 0:
+                    return None
+                continue
+            tag = max(close, key=version_key)
+        ref = "%s/%s:%s" % (host, path, tag)
+        if not registry_probe(ref)[0]:        # listed is not the same as pullable: ask for it
+            if n == 0:
+                return None
+            continue
+        refs.append(ref)
+    return refs
+
+
+def newer_versions(item, registry, repos):
+    """What the registry has that the item doesn't list yet: the newest patch of a line it already
+    has, when that's newer than what it has, and the newest patch of any newer line.
+    {version: {refs, kind: patch|line, group}}"""
+    newest = {}
+    for v in item["versions"]:
+        newest[version_line(v)] = max(newest.get(version_line(v), ()), version_key(v))
+    found = {}
+    for group in catalog_groups(item):
+        candidates = set()
+        if "{v}" in group["path"]:
+            rx = template_regex(group["path"])
+            candidates = {m.group(1) for m in (rx.match(repo) for repo in repos) if m}
+        else:
+            tags = registry.tags(group["path"])
+            for tag_t in group["tags"]:
+                rx = template_regex(tag_t)
+                candidates |= {m.group(1) for m in (rx.match(tag) for tag in tags) if m}
+        best = {}
+        for version in candidates:
+            line = version_line(version)
+            if line not in best or version_key(version) > version_key(best[line]):
+                best[line] = version
+        group_top = max(version_line(v) for v in group["versions"])
+        for line, version in sorted(best.items(), reverse=True):
+            if version in item["versions"] or version in found:
+                continue
+            if line in newest and version_key(version) > newest[line]:
+                kind = "patch"
+            elif line not in newest and line > group_top:
+                kind = "line"
+            else:
+                continue
+            refs = refs_for(item, group, version, registry)
+            if refs:
+                found[version] = {"refs": refs, "kind": kind, "group": group["path"]}
+    return found
+
+
+def check_refs(catalog):
+    """Every reference in the catalog, asked for anonymously: {ref: (answered, detail)}."""
+    refs = sorted({ref for item in catalog.values() for refs in item["versions"].values() for ref in refs})
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        return dict(zip(refs, pool.map(registry_probe, refs)))
+
+
+def not_in_catalog(catalog, repos):
+    """Supervisor Service repositories under a name the catalog doesn't use at all, so another
+    naming or a component image of an item it has doesn't count: {name: (newest version, repository)}."""
+    known = set()
+    for item in catalog.values():
+        for version, refs in item["versions"].items():
+            for ref in refs:
+                known |= set(ref_template(ref, version)[1].split("/"))
+    names = {}
+    for repo in repos:
+        match = re.match(r"^vsphere/(?:supervisor|iaas)/([^/]+)/([^/]+)/", repo)
+        if not match or match.group(1) in known:
+            continue
+        name, version = match.groups()
+        if not re.match("^%s$" % PLAIN_VERSION, version):
+            names.setdefault(name, ("", repo))
+        elif not names.get(name, ("",))[0] or version_key(version) > version_key(names[name][0]):
+            names[name] = (version, repo)
+    return names
+
+
+def item_bounds(lines, key):
+    start = next(i for i, line in enumerate(lines) if re.match(r"^%s:\s*(#.*)?$" % re.escape(key), line))
+    end = next((i for i in range(start + 1, len(lines)) if re.match(r"^[^\s#]", lines[i])), len(lines))
+    return start, end
+
+
+def item_entries(lines, start, end):
+    """An item's versions as they sit in the file: [[version, first line, the line after it]]."""
+    entries = []
+    for i in range(start, end):
+        match = re.match(r'^    "?([^":\s]+)"?:', lines[i])
+        if match:
+            entries.append([match.group(1), i, i + 1])
+        elif entries and lines[i].startswith("      "):
+            entries[-1][2] = i + 1
+    return entries
+
+
+def yaml_text(text):
+    """Free text as one double-quoted YAML string."""
+    return '"%s"' % " ".join(str(text).split()).replace("\\", "/").replace('"', "'")
+
+
+def rewrite_catalog(text, catalog, changes, checked):
+    """catalog.yml with the agreed changes made and every comment and other line left as it was.
+    changes: {item: {"add": {version: {"refs", "group"}}, "remove": [versions],
+                     "default": version, "hold": reason, or "" to clear it}}"""
+    lines = text.splitlines(True)
+    for key, change in changes.items():
+        item = catalog[key]
+        for version in sorted(change.get("add") or {}, key=version_key, reverse=True):
+            new = change["add"][version]
+            start, end = item_bounds(lines, key)
+            entries = item_entries(lines, start, end)
+            same = [e for e in entries if e[0] in item["versions"]
+                    and ref_template(item["versions"][e[0]][0], e[0])[1] == new["group"]]
+            older = [e for e in same if version_key(e[0]) < version_key(version)]
+            at = older[0][1] if older else (same[-1][2] if same else entries[0][1])
+            refs = new["refs"]
+            lines[at:at] = (['    "%s": %s\n' % (version, refs[0])] if len(refs) == 1 else
+                            ['    "%s":\n' % version] + ["      - %s\n" % ref for ref in refs])
+        for version in change.get("remove") or []:
+            start, end = item_bounds(lines, key)
+            for entry in reversed(item_entries(lines, start, end)):
+                if entry[0] == version:
+                    del lines[entry[1]:entry[2]]
+        if "hold" in change:
+            start, end = item_bounds(lines, key)
+            lines[start:end] = [line for line in lines[start:end] if not re.match(r"^  hold:", line)]
+        start, end = item_bounds(lines, key)
+        for i in range(start, end):
+            match = re.match(r'^(  default:\s*)("?)[^"#\s]*\2(.*)$', lines[i].rstrip("\n"))
+            if match:
+                if change.get("default"):
+                    lines[i] = '%s"%s"%s\n' % (match.group(1), change["default"], match.group(3))
+                if change.get("hold"):
+                    lines.insert(i + 1, "  hold: %s\n" % yaml_text(change["hold"]))
+                break
+    if checked and not any(re.match(r"^# Last checked:", line) for line in lines):
+        # An older catalog without the line gets one at the end of its opening comments.
+        at = next((i for i, line in enumerate(lines) if not line.startswith("#")), len(lines))
+        lines[at:at] = ["#\n", "# Last checked: %s\n" % checked]
+    text = "".join(lines)
+    if checked:
+        text = re.sub(r"(?m)^(# Last checked:[ \t]*)\d{4}-\d{2}-\d{2}", r"\g<1>" + checked, text, count=1)
+    return text
+
+
+def pinned(value):
+    """The versions an environment pins for an item: a version or a list of them. true and false pin nothing."""
+    if isinstance(value, bool) or value is None:
+        return []
+    return [str(v) for v in value] if isinstance(value, list) else [str(value)]
+
+
+def move_pin(env, key, old, new, catalog):
+    """Change one version an environment pins in its broadcom.yml, on that item's line only, and
+    keep the change only if the inventory still reads cleanly. Returns the file, or None."""
+    rel = Inventory(env).where("broadcom_items")
+    path = os.path.join(REPO, rel)
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as handle:
+        before = handle.read()
+    lines, inside, done = before.splitlines(True), False, False
+    for i, line in enumerate(lines):
+        if re.match(r"^broadcom_items:", line):
+            inside = True
+            continue
+        if inside and re.match(r"^[^\s#]", line):
+            break
+        match = re.match(r"^(\s+%s:)(.*)$" % re.escape(key), line) if inside else None
+        if match:
+            value, sep, comment = match.group(2).partition("#")
+            for pattern in (r'"%s"' % re.escape(old), r"'%s'" % re.escape(old), r"(?<![\w.])%s(?![\w.])" % re.escape(old)):
+                changed = re.sub(pattern, lambda m: m.group(0).replace(old, new), value, count=1)
+                if changed != value:
+                    lines[i] = match.group(1) + changed + sep + comment + ("\n" if line.endswith("\n") else "")
+                    done = True
+                    break
+            break
+    if not done:
+        return None
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("".join(lines))
+    choices, problems = wanted_items(Inventory(env), catalog)
+    if problems or new not in choices.get(key, []):
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(before)
+        return None
+    return rel
+
+
+def interactive():
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def ask(question, default):
+    """Yes or no at the terminal. Enter takes the default, shown in capitals."""
+    while True:
+        try:
+            answer = input("    %s %s " % (question, "[Y/n]" if default else "[y/N]")).strip().lower()
+        except EOFError:
+            print("")
+            return default
+        if not answer:
+            return default
+        if answer in ("y", "yes"):
+            return True
+        if answer in ("n", "no"):
+            return False
+        print("    y or n, please")
+
+
+def ask_text(question):
+    try:
+        return input("    %s " % question).strip()
+    except EOFError:
+        print("")
+        return ""
+
+
+def decide(question, recommended, mode):
+    """Ask in a terminal; otherwise show the recommended answer, which --yes then takes."""
+    if mode == "ask":
+        return ask(question, recommended)
+    print("    %s %s" % (question, "yes" if recommended else "no"))
+    return recommended
+
+
+def refresh_catalog(path, catalog, mode, why_report=""):
+    """mode: ask (a terminal), yes (take every recommended answer) or report (change nothing)."""
+    rel = os.path.relpath(path, REPO)
+    today = datetime.date.today().isoformat()
+    hosts = sorted({parse_ref(ref)["host"] for item in catalog.values()
+                    for refs in item["versions"].values() for ref in refs})
+
+    step("Checking %s against %s" % (rel, ", ".join(hosts)))
+    results = check_refs(catalog)
+    failed = {ref: detail for ref, (ok, detail) in results.items() if not ok}
+    if results and len(failed) == len(results):
+        die("none of the %d references answered (%s). Is %s reachable from here? Nothing was changed"
+            % (len(results), sorted(failed.values())[0], ", ".join(hosts)))
+    for ref, detail in sorted(failed.items()):
+        row("FAIL", ref, detail)
+    row("OK" if not failed else "WARN", "%d of %d references answer without a login" % (len(results) - len(failed), len(results)))
+    # Gone means the registry said so. A timeout or a 5xx is the network, not Broadcom removing it.
+    gone = {(key, version) for key, item in catalog.items() for version, refs in item["versions"].items()
+            if failed.get(refs[0]) == "HTTP 404"}
+
+    step("Looking for newer versions")
+    added, registries = {}, {}
+    try:
+        for host in hosts:
+            registry = Registry(host)
+            try:
+                repos = registry.repositories()
+            except urllib.error.HTTPError as error:
+                repos = []
+                row("WARN", "%s won't list its repositories (HTTP %s)" % (host, error.code),
+                    "so new versions named by path can't be found; check Broadcom's release notes")
+            registries[host] = (registry, repos)
+            log("%d repositories in %s" % (len(repos), host))
+        for key, item in catalog.items():
+            registry, repos = registries[parse_ref(item["versions"][item["default"]][0])["host"]]
+            new = newer_versions(item, registry, repos)
+            if new:
+                added[key] = new
+    except (OSError, http.client.HTTPException, ValueError) as error:
+        die("could not read %s (%s). Run this on the connected workstation; nothing was changed"
+            % (", ".join(hosts), getattr(error, "reason", error)))
+    if not added:
+        row("OK", "nothing newer: every item has the newest patch of each line it carries")
+    for key, new in added.items():
+        default_line = version_line(catalog[key]["default"])
+        for version in sorted(new, key=version_key, reverse=True):
+            line = version_line(version)
+            note = ("newer patch of the default's line" if line == default_line else
+                    "newer line than the default" if line > default_line else
+                    "newer patch of %s" % ".".join(str(n) for n in line))
+            row("NEW", "%s %s" % (key, version), "%s (default %s)" % (note, catalog[key]["default"]), width=34)
+
+    usage = {}
+    for env in environment_names():
+        raw = Inventory(env).vars.get("broadcom_items")
+        for key, value in (raw.items() if isinstance(raw, dict) else []):
+            entry = usage.setdefault(str(key), {"follow": [], "pins": []})
+            if value is True:
+                entry["follow"].append(env)
+            entry["pins"] += [(env, v) for v in pinned(value)]
+
+    step({"ask": "Your call on each change", "yes": "Taking the recommended answers",
+          "report": "What it would ask, with the recommended answers"}[mode])
+    changes, pin_moves, asked = {}, [], False
+    for key, item in catalog.items():
+        new = added.get(key, {})
+        use = usage.get(key, {"follow": [], "pins": []})
+        default, change = item["default"], {}
+        if new:
+            change["add"] = new
+        followers = ", ".join(use["follow"]) or "no environment"
+
+        patch = max((v for v in new if version_line(v) == version_line(default)
+                     and version_key(v) > version_key(default)), key=version_key, default=None)
+        if patch:
+            asked = True
+            if item.get("hold"):
+                print("    %s is held at %s: %s" % (key, default, item["hold"]))
+            if decide("%s: make %s the default instead of %s? (%s follows the default)"
+                      % (key, patch, default, followers), not item.get("hold"), mode):
+                change.update(default=patch, hold="")
+            elif mode == "ask" and not item.get("hold"):
+                reason = ask_text("Why keep %s? It's saved in %s for whoever runs this next (Enter to skip):" % (default, rel))
+                change["hold"] = "%s (%s, %s)" % (reason or "kept %s" % default, getpass.getuser(), today)
+
+        ahead = max((v for v in new if version_line(v) > version_line(default)), key=version_key, default=None)
+        if ahead and not change.get("default"):
+            asked = True
+            if decide("%s: %s is on a newer line. Make it the default instead of %s? Read its release notes first."
+                      % (key, ahead, default), False, mode):
+                change.update(default=ahead, hold="")
+
+        available = set(item["versions"]) | set(new)
+        for env, version in use["pins"]:
+            better = max((v for v in available if version_line(v) == version_line(version)
+                          and version_key(v) > version_key(version)), key=version_key, default=None)
+            if version in available and better:
+                asked = True
+                if decide("%s pins %s %s. Move it to %s, the newest patch of that line?" % (env, key, version, better),
+                          False, mode):
+                    pin_moves.append((env, key, version, better))
+
+        removed = []
+        for version in item["versions"]:
+            if (key, version) not in gone:
+                continue
+            users = sorted({env for env, v in use["pins"] if v == version} | (set(use["follow"]) if version == default else set()))
+            if version == default:
+                row("FAIL", "%s %s" % (key, version), "is the default and Broadcom's registry no longer has it: choose another", width=34)
+            elif users:
+                row("WARN", "%s %s" % (key, version), "is gone from Broadcom's registry; kept because %s uses it" % ", ".join(users), width=34)
+            else:
+                asked = True
+                if decide("%s %s is gone from Broadcom's registry and nothing uses it. Remove it from the catalog?"
+                          % (key, version), True, mode):
+                    removed.append(version)
+        if removed:
+            change["remove"] = removed
+        if change:
+            changes[key] = change
+    if not asked:
+        row("OK", "nothing to decide")
+
+    held = [(key, item) for key, item in catalog.items() if item.get("hold") and changes.get(key, {}).get("hold") != ""]
+    if held:
+        step("Held")
+        for key, item in held:
+            row("", "%s at %s" % (key, item["default"]), item["hold"], width=34)
+
+    others = {}
+    for registry, repos in registries.values():
+        others.update(not_in_catalog(catalog, repos))
+    if others:
+        step("In the registry under names the catalog doesn't use")
+        for name in sorted(others):
+            version, repo = others[name]
+            row("", name, ("newest %s: %s" % (version, repo)) if version else repo, width=38)
+        log("Not every one is something you install. Add one by hand if an environment needs it.")
+
+    if mode == "report":
+        step("Nothing was changed")
+        if why_report:
+            log(why_report)
+        print("    python3 kit catalog --refresh          asks about each change, in a terminal")
+        print("    python3 kit catalog --refresh --yes    takes the recommended answers")
+        return
+
+    removed_refs = {refs[0] for key, change in changes.items() for v in change.get("remove", [])
+                    for refs in [catalog[key]["versions"][v]]}
+    all_answer = all(ref in removed_refs for ref in failed)
+    with open(path, encoding="utf-8") as handle:
+        old = handle.read()
+    text = rewrite_catalog(old, catalog, changes, today if all_answer else None)
+    if text != old:
+        tmp = path + ".new"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        try:
+            updated = load_catalog(tmp)
+        except KitError:
+            os.remove(tmp)
+            die("the updated catalog did not load (see above), so %s is unchanged" % rel, 2)
+        shutil.copyfile(path, path + ".previous")
+        os.replace(tmp, path)
+    else:
+        updated = catalog
+
+    step("Done")
+    for key, change in changes.items():
+        parts = []
+        if change.get("add"):
+            parts.append("added " + ", ".join(sorted(change["add"], key=version_key, reverse=True)))
+        if change.get("remove"):
+            parts.append("removed " + ", ".join(change["remove"]))
+        if change.get("default"):
+            parts.append("default %s -> %s" % (catalog[key]["default"], change["default"]))
+        if change.get("hold"):
+            parts.append("held at %s" % catalog[key]["default"])
+        elif change.get("hold") == "" and catalog[key].get("hold"):
+            parts.append("hold cleared")
+        row("", key, "; ".join(parts), width=34)
+    for env, key, version, better in pin_moves:
+        where = move_pin(env, key, version, better, updated)
+        if where:
+            row("OK", "%s: %s %s -> %s" % (env, key, version, better), "in " + where, width=34)
+        else:
+            row("WARN", "%s: %s %s -> %s" % (env, key, version, better),
+                "not changed: edit %s by hand" % Inventory(env).where("broadcom_items"), width=34)
+    if text != old:
+        log("Wrote %s; the one before is %s.previous" % (rel, rel))
+    log("Last checked: %s" % (today if all_answer else "unchanged, because not every reference answered"))
+    if changes or pin_moves:
+        log("Next: python3 kit check, then fetch as usual.")
+
+
+def cmd_catalog(args):
+    path = repo_path("broadcom/catalog.yml")
+    catalog = load_catalog(path)
+    if not catalog:
         die("there is no broadcom/catalog.yml in %s" % REPO)
-    envs = [args.env] if args.env else [name for name in inventory_names() if not name.startswith("_")]
+    if args.refresh or args.yes or args.dry_run:
+        if args.dry_run:
+            refresh_catalog(path, catalog, "report")
+        elif args.yes:
+            refresh_catalog(path, catalog, "yes")
+        elif interactive():
+            refresh_catalog(path, catalog, "ask")
+        else:
+            refresh_catalog(path, catalog, "report", "This isn't a terminal, so there was no one to ask.")
+        return
+    envs = [args.env] if args.env else environment_names()
     turned_on = {}
     for env in envs:
         choices, problems = wanted_items(Inventory(env), catalog)
@@ -1540,6 +3016,8 @@ def cmd_catalog(args):
             ", ".join(versions[:6]) + (", ..." if len(versions) > 6 else ""), item["default"], item["project"]), width=28)
         if item.get("needs"):
             row("", "", "needs " + str(item["needs"]), width=28)
+        if item.get("hold"):
+            row("", "", "held at %s: %s" % (item["default"], item["hold"]), width=28)
         row("", "", "on in: " + (", ".join(turned_on.get(key, [])) or "none of %s" % ", ".join(envs)), width=28)
     print("")
 
@@ -1556,11 +3034,24 @@ def main():
     commands.add_parser("fetch", help="download and verify everything into one transfer folder")
     catalog = commands.add_parser("catalog", help="what broadcom/catalog.yml offers and what each environment turns on")
     catalog.add_argument("--env", help="only this inventory")
+    catalog.add_argument("--refresh", action="store_true",
+                         help="check every reference, look for newer versions in Broadcom's registry, and ask "
+                              "yes or no before changing anything")
+    catalog.add_argument("--yes", action="store_true",
+                         help="with --refresh, for unattended runs: take every recommended answer")
+    catalog.add_argument("--write", dest="yes", action="store_true", help=argparse.SUPPRESS)
+    catalog.add_argument("--dry-run", action="store_true",
+                         help="with --refresh: show what it would ask, change nothing")
 
-    verify = commands.add_parser("verify", help="check a transfer against its SHA256SUMS")
-    verify.add_argument("--from", dest="from_dir", required=True, metavar="DIR", help="the transfer folder")
+    choose = commands.add_parser("choose", help="pick the Broadcom content an environment gets, before a fetch")
+    choose.add_argument("--env", required=True, help="the inventory under inventories/, e.g. dev")
+    verify = commands.add_parser("verify", help="check a transfer (--from), or an environment's registry (--env)")
+    which = verify.add_mutually_exclusive_group(required=True)
+    which.add_argument("--from", dest="from_dir", metavar="DIR", help="a transfer folder, against its SHA256SUMS")
+    which.add_argument("--env", help="the environment whose registry to check, e.g. dev")
 
-    publish = commands.add_parser("publish", help="inside: verify, stage, and upload the Harbor files to Nexus")
+    publish = commands.add_parser("publish", help="inside: check the transfer and stage it, uploading the Harbor "
+                                                  "files to Nexus when the environment uses one")
     publish.add_argument("--from", dest="from_dir", required=True, metavar="DIR", help="the transfer folder")
     publish.add_argument("--env", required=True, help="the inventory under inventories/, e.g. prod")
     publish.add_argument("--nexus", help="Nexus URL, when the inventory has nexus_enabled: true; default nexus_url")
@@ -1568,7 +3059,23 @@ def main():
     publish.add_argument("--staging", help="default artifact_staging from the inventory")
     publish.add_argument("--skip-nexus", action="store_true", help="stage only; publish later")
 
-    load = commands.add_parser("load", help="inside, after make build-registry: push the Broadcom bundles into Harbor")
+    setup = commands.add_parser("setup", help="inside: answer a few questions and the environment's inventory, "
+                                              "certificate and vault are written for you")
+    setup.add_argument("--env", required=True, help="the inventory under inventories/, e.g. dev")
+
+    doctor = commands.add_parser("doctor", help="inside: check everything a build needs, and change nothing")
+    doctor.add_argument("--env", required=True, help="the inventory under inventories/, e.g. dev")
+
+    build = commands.add_parser("build", help="inside: check, then build or update the environment's registry")
+    build.add_argument("--env", required=True, help="the inventory under inventories/, e.g. dev")
+
+    remove = commands.add_parser("remove", help="inside: take Harbor off the environment's server; its images stay")
+    remove.add_argument("--env", required=True, help="the inventory under inventories/, e.g. dev")
+    remove.add_argument("--keep-certificate", action="store_true", help="leave the registry's certificate on the server")
+    remove.add_argument("--purge-data", action="store_true", help="also delete every image (asks you to type the "
+                                                                  "environment's name)")
+
+    load = commands.add_parser("load", help="inside, after python3 kit build: push the Broadcom bundles into Harbor")
     load.add_argument("--env", required=True, help="the inventory under inventories/, e.g. prod")
     load.add_argument("--from", dest="from_dir", metavar="DIR", help="default <staging>/broadcom")
     load.add_argument("--registry", help="Harbor's name; default harbor_hostname from the inventory")
@@ -1582,8 +3089,13 @@ def main():
     if not args.command:
         parser.print_help()
         return 1
-    handlers = {"check": cmd_check, "fetch": cmd_fetch, "catalog": cmd_catalog, "verify": cmd_verify,
-                "publish": cmd_publish, "load": cmd_load}
+    handlers = {"choose": cmd_choose, "check": cmd_check, "fetch": cmd_fetch, "catalog": cmd_catalog,
+                "verify": cmd_verify, "publish": cmd_publish, "setup": cmd_setup, "doctor": cmd_doctor,
+                "build": cmd_build, "load": cmd_load, "remove": cmd_remove}
+    # A repository with its own Ansible in .venv (the lab's bootstrap puts one there) uses it, as make does.
+    venv = os.path.join(REPO, ".venv", "bin")
+    if os.path.isfile(os.path.join(venv, "ansible-playbook")):
+        os.environ["PATH"] = venv + os.pathsep + os.environ.get("PATH", "")
     try:
         handlers[args.command](args)
         return 0

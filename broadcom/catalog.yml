@@ -1,6 +1,7 @@
 # broadcom/catalog.yml: the Broadcom content this kit knows how to carry.
 #
-# Each environment turns items on in inventories/<env>/group_vars/registry/broadcom.yml:
+# Each environment turns items on in inventories/<env>/group_vars/registry/broadcom.yml,
+# which python3 kit choose --env <env> writes:
 #
 #   broadcom_items:
 #     argocd-service: true          # the default version below
@@ -8,13 +9,16 @@
 #     vks: ["3.6.3", "3.7.1"]       # several, e.g. to carry an upgrade path
 #     velero-operator: false        # not this one
 #
-# python3 kit fetch carries what any environment turns on, make build-registry
+# python3 kit fetch carries what any environment turns on, python3 kit build
 # creates the Harbor projects they go to, and python3 kit load --env <env> pushes
 # that environment's items. python3 kit catalog shows what is here and who uses it.
 #
-# Every reference below was read from projects.packages.broadcom.com on
-# 2026-10-05; none of them needs a Broadcom login. To add a version, put it at
-# the top of the item's versions and run python3 kit check.
+# Every reference below comes from projects.packages.broadcom.com and needs no
+# Broadcom login. python3 kit catalog --refresh checks that again and looks for
+# newer versions; --write adds them here. To add one by hand, put it in the
+# item's versions, newest first, and run python3 kit check.
+#
+# Last checked: 2026-10-09
 #
 # kind:
 #   supervisor-service   a bundle the Supervisor installs from; its YAML comes from
@@ -78,8 +82,9 @@ consumption-interface:
   kind: supervisor-service
   project: sup-services
   needs: vSphere 8.0 U3 or later; uninstall 1.0.x before moving to 9.x
-  default: "9.1.2"
+  default: "9.1.3"
   versions:
+    "9.1.3": projects.packages.broadcom.com/vsphere/iaas/lci-service/9.1.3/lci-package:9.1.3-c43610e2
     "9.1.2": projects.packages.broadcom.com/vsphere/iaas/lci-service/9.1.2/lci-package:9.1.2-516b3a9f
     "9.1.1": projects.packages.broadcom.com/vsphere/iaas/lci-service/9.1.1/lci-package:9.1.1-9a2924cb
     "9.1.0": projects.packages.broadcom.com/vsphere/iaas/lci-service/9.1.0/lci-package:9.1.0-b2d0d12e
@@ -159,8 +164,9 @@ vks:
   kind: supervisor-service
   project: vks
   needs: vSphere 8.0 U3 or later. Broadcom says not to host it on a Harbor that runs on VKS
-  default: "3.7.1"
+  default: "3.7.2"
   versions:
+    "3.7.2": projects.packages.broadcom.com/vsphere/iaas/vsphere-kubernetes-service/3.7.2/vsphere-kubernetes-service:3.7.2
     "3.7.1": projects.packages.broadcom.com/vsphere/iaas/vsphere-kubernetes-service/3.7.1/vsphere-kubernetes-service:3.7.1
     "3.7.0": projects.packages.broadcom.com/vsphere/iaas/vsphere-kubernetes-service/3.7.0/vsphere-kubernetes-service:3.7.0
     "3.6.3": projects.packages.broadcom.com/vsphere/iaas/vsphere-kubernetes-service/3.6.3/vsphere-kubernetes-service:3.6.3

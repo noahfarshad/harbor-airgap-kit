@@ -7,12 +7,10 @@
 # Settings: inventories/connected/group_vars/all/stage.yml.
 #
 # Usage:
-#   make stage-harbor
-#   # or:
 #   ansible-playbook -i inventories/connected/hosts stage_harbor_artifacts.yml
 #
-# Output: artifacts/harbor/. Carry it across, then run make pull-harbor inside
-# the environment.
+# Output: artifacts/harbor/. Carry it across, then run scripts/pull_harbor.sh
+# inside the environment.
 
 - name: Put the Harbor files together for a transfer
   hosts: localhost

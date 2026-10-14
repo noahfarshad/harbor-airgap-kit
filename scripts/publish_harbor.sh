@@ -57,7 +57,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$NEXUS" ]] || { usage >&2; die "--nexus is required"; }
-[[ -d "$FILES" ]] || die "$FILES is not a directory; run make pull-harbor first"
+[[ -d "$FILES" ]] || die "$FILES is not a directory; stage the Harbor files first (python3 kit publish)"
 for tool in curl sha256sum awk sort comm find; do
   command -v "$tool" >/dev/null || die "$tool is required"
 done
@@ -120,4 +120,4 @@ for f in "${yum_files[@]}"; do put "$FILES/$f" "$yum_base/$(basename "$f")"; don
 
 VERSION="$(awk -F': *' '$1 == "harbor_version" { gsub(/"/, "", $2); print $2 }' "$FILES/harbor_artifacts.yml")"
 log "Published Harbor $VERSION to $NEXUS"
-[[ -n "${KIT_RUNNING:-}" ]] || log "Next: commit inventories/<env>/group_vars/registry/harbor_artifacts.yml, then make build-registry ENV=<env>"
+[[ -n "${KIT_RUNNING:-}" ]] || log "Next: python3 kit build --env <env>"

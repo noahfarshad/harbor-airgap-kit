@@ -257,7 +257,7 @@ SHA="$(sha256sum "$FILES/$INSTALLER" | awk '{print $1}')"
 {
   printf -- '---\n'
   printf '# group_vars/registry/harbor_artifacts.yml\n#\n'
-  printf '# Written by scripts/fetch_harbor.sh on %s. kit publish (or make pull-harbor)\n' "$(date '+%F')"
+  printf '# Written by scripts/fetch_harbor.sh on %s. kit publish (or pull_harbor.sh)\n' "$(date '+%F')"
   printf '# copies it into inventories/<env>/group_vars/registry/. The roles check the\n'
   printf '# Harbor files against these checksums once they land.\n\n'
   printf 'harbor_version:           "%s"\n' "$VERSION"
@@ -279,6 +279,6 @@ mv "$FILES" "$OUT"
 log "Harbor files written to $OUT: Harbor $VERSION, sha256 $SHA"
 if [[ -z "${KIT_RUNNING:-}" ]]; then   # python3 kit prints its own next steps
   log "Next: carry $OUT across, then inside the environment:"
-  log "  make pull-harbor    ENV=<env> FROM=<where you put it>"
-  log "  make publish-harbor ENV=<env> NEXUS=https://<nexus>"
+  log "  scripts/pull_harbor.sh --from <where you put it> --inventory inventories/<env>"
+  log "  python3 kit setup --env <env>, then python3 kit build --env <env>"
 fi

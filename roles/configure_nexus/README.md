@@ -16,11 +16,9 @@ API, from whichever host runs Ansible:
 It reads before it writes, so a second run reports no changes. It works on any
 Nexus 3 an admin account can reach:
 
-    make configure-nexus ENV=<env>
+    ansible-playbook -i inventories/<env>/hosts configure_nexus.yml --ask-vault-pass
 
-<!-- [lab] -->
 The lab runs it as part of `make lab-up`, against its own Nexus.
-<!-- [/lab] -->
 
 Role Variables
 --------------

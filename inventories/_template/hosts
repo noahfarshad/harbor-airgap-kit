@@ -4,8 +4,11 @@
 # CHANGE_ME.
 #
 # One group per kind of server; each group's settings live in group_vars/<group>/
-# and each server's in host_vars/<host>.yml. registry01 is the registry's name in
-# this inventory: rename it here and rename host_vars/registry01.yml to match.
+# and each server's in host_vars/<host>.yml. registry01 is only a label for the
+# registry in this inventory, not the server's name: Ansible connects to
+# registry_server_fqdn from host_vars/registry01.yml. Rename the label and that
+# file together. When Harbor goes on the machine you run Ansible from, set
+# ansible_connection: local in that file.
 
 [registry]
 registry01

@@ -18,7 +18,7 @@ podman_offline_compose_provider: "{{ harbor_podman_compose_provider | default('p
 podman_offline_compose_source: staged        # staged (RPMs staged on disk) | yum (a repository the server reads)
 
 # yum source: a repository that carries podman-compose, such as the Nexus yum
-# repository make publish-harbor fills. Empty = the server's existing repositories.
+# repository python3 kit publish fills. Empty = the server's existing repositories.
 podman_offline_yum_repo_url: ""
 podman_offline_yum_repo_name: harbor-epel
 podman_offline_yum_gpgkey: ""                # URL of RPM-GPG-KEY-EPEL-9, uploaded with the Harbor files

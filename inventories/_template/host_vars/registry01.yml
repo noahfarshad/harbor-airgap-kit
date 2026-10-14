@@ -8,6 +8,7 @@
 # Supervisor's management network and the VKS workload networks.
 registry_server_fqdn:   CHANGE_ME.example.com
 ansible_host:           "{{ registry_server_fqdn }}"
+# ansible_connection:   local      # when Harbor goes on the machine you run Ansible from
 
 # --- The registry name ------------------------------------------------------------
 # What the Supervisor, VKS nodes and pushes use. Give it its own DNS record and

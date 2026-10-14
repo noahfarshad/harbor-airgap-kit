@@ -34,10 +34,12 @@ log "Installing ansible-core into $REPO/.venv"
 .venv/bin/pip install -q --disable-pip-version-check -r lab/requirements-ansible.txt
 export PATH="$REPO/.venv/bin:$PATH"
 
-log "Installing Ansible collections into $REPO/collections"
-ansible-galaxy collection install -r requirements.yml -p collections >/dev/null
+if grep -q '^ *- name:' requirements.yml; then       # nothing today: the playbooks only use ansible.builtin
+  log "Installing Ansible collections into $REPO/collections"
+  ansible-galaxy collection install -r requirements.yml -p collections >/dev/null
+fi
 
 log "Building the lab: vault, CA, Nexus, and Nexus's repositories and accounts"
 make lab-up
 
-log "Lab ready. Next: make lab-demo (in $REPO) runs the whole pipeline; make lab-info shows where everything is."
+log "Lab ready. Next: make lab-run (in $REPO) runs the whole pipeline; make lab-info shows where everything is."

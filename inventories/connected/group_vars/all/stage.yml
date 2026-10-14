@@ -1,7 +1,7 @@
 ---
 # inventories/connected/group_vars/all/stage.yml
 #
-# What make stage-harbor puts in the Harbor files. Run it on a RHEL 9 host at
+# What stage_harbor_artifacts.yml puts in the Harbor files. Run it on a RHEL 9 host at
 # the same minor release as the registry servers, with EPEL enabled.
 
 stage_harbor_version:                  "2.15.2"

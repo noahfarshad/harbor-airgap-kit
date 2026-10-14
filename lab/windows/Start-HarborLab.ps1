@@ -37,7 +37,7 @@ Write-Host "$Name is running, and stays up until: wsl --terminate $Name"
 
 $built = (& wsl.exe -d $Name -u root -- sh -c 'systemctl is-enabled harbor >/dev/null 2>&1 && echo yes || echo no') -join ''
 if ($built -ne 'yes') {
-    Write-Host "Harbor isn't built in the lab yet: wsl -d $Name -- make -C /opt/harbor-airgap-kit lab-demo"
+    Write-Host "Harbor isn't built in the lab yet: wsl -d $Name -- make -C /opt/harbor-airgap-kit lab-run"
     return
 }
 

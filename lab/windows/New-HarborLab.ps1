@@ -11,13 +11,13 @@
     Your other WSL distributions are not touched. Run it again at any time: it
     reuses the distribution and keeps the lab's vault, runtime and last publish.
 
-.PARAMETER Demo
-    Also run the whole pipeline end to end (make lab-demo): build the
+.PARAMETER RunPipeline
+    Also run the whole pipeline end to end (make lab-run): build the
     transfer, publish it to Nexus, build Harbor, load the Broadcom bundles,
     verify.
 
 .PARAMETER Runtime
-    With -Demo: the container runtime Harbor runs on, podman (the default) or
+    With -RunPipeline: the container runtime Harbor runs on, podman (the default) or
     docker (Docker CE, from the transfer). Harbor moves runtimes with its data.
 
 .PARAMETER Recreate
@@ -28,10 +28,10 @@
     this script is in (two levels up from lab\windows).
 
 .EXAMPLE
-    PowerShell -ExecutionPolicy Bypass -File .\lab\windows\New-HarborLab.ps1 -Demo
+    PowerShell -ExecutionPolicy Bypass -File .\lab\windows\New-HarborLab.ps1 -RunPipeline
 
 .EXAMPLE
-    PowerShell -ExecutionPolicy Bypass -File .\lab\windows\New-HarborLab.ps1 -Demo -Runtime docker
+    PowerShell -ExecutionPolicy Bypass -File .\lab\windows\New-HarborLab.ps1 -RunPipeline -Runtime docker
 #>
 [CmdletBinding()]
 param(
@@ -39,7 +39,7 @@ param(
     [string] $Distribution = 'AlmaLinux-9',
     [string] $Location = (Join-Path $env:LOCALAPPDATA 'harbor-lab'),
     [string] $RepoPath,
-    [switch] $Demo,
+    [switch] $RunPipeline,
     [ValidateSet('podman', 'docker')] [string] $Runtime,
     [switch] $Recreate
 )
@@ -62,7 +62,7 @@ function Invoke-Lab {
     if ($LASTEXITCODE -ne 0) { throw "Failed in ${Name} (exit $LASTEXITCODE): $($args -join ' ')" }
 }
 
-if ($Runtime -and -not $Demo) { throw '-Runtime goes with -Demo: it chooses the runtime the demo builds Harbor on' }
+if ($Runtime -and -not $RunPipeline) { throw '-Runtime goes with -RunPipeline: it chooses the runtime the pipeline builds Harbor on' }
 
 Write-Step 'Checking WSL'
 try { $versionText = (& wsl.exe --version) -join "`n" } catch { $versionText = '' }
@@ -107,13 +107,13 @@ Write-Step "Copying $RepoPath to $LinuxRepo (keeping the lab's vault, runtime an
     "--exclude=./collections --exclude=./dist --exclude=./.venv . | tar -C $LinuxRepo -xf - && chmod -R go-w $LinuxRepo")
 if ($LASTEXITCODE -ne 0) { throw 'Copying the repository failed' }
 
-Write-Step 'Setting up the lab: packages, Ansible collections, CA, Nexus (about 10 minutes the first time)'
+Write-Step 'Setting up the lab: packages, CA, Nexus (about 10 minutes the first time)'
 Invoke-Lab bash "$LinuxRepo/lab/bootstrap.sh"
 
-if ($Demo) {
-    Write-Step 'Running the pipeline end to end (make lab-demo)'
-    if ($Runtime) { Invoke-Lab make -C $LinuxRepo lab-demo "RUNTIME=$Runtime" }
-    else { Invoke-Lab make -C $LinuxRepo lab-demo }
+if ($RunPipeline) {
+    Write-Step 'Running the pipeline end to end (make lab-run)'
+    if ($Runtime) { Invoke-Lab make -C $LinuxRepo lab-run "RUNTIME=$Runtime" }
+    else { Invoke-Lab make -C $LinuxRepo lab-run }
 }
 
 # WSL would stop the lab 15 seconds after this script ends, and Harbor with it.
@@ -123,8 +123,8 @@ Write-Step 'Keeping the lab running in the background'
 Write-Step 'Done'
 Write-Host @"
   A shell in the lab:           wsl -d $Name
-  Run the whole pipeline:       wsl -d $Name -- make -C $LinuxRepo lab-demo
-  The same on Docker CE:        wsl -d $Name -- make -C $LinuxRepo lab-demo RUNTIME=docker
+  Run the whole pipeline:       wsl -d $Name -- make -C $LinuxRepo lab-run
+  The same on Docker CE:        wsl -d $Name -- make -C $LinuxRepo lab-run RUNTIME=docker
   Where everything is:          wsl -d $Name -- make -C $LinuxRepo lab-info
   Stop the lab:                 wsl --terminate $Name
   Start it again later:         PowerShell -ExecutionPolicy Bypass -File .\lab\windows\Start-HarborLab.ps1

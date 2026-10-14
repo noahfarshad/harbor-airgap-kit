@@ -1,18 +1,19 @@
 # harbor-airgap-kit
 #
+# Environments are run with python3 kit (setup, build, load, verify; see
+# python3 kit --help), which checks everything before it starts a playbook.
+# These targets are for the lab, the checks on this repository, and packaging.
 # Anything that touches an environment needs ENV, the name of its directory
 # under inventories/:
 #
-#   make build-registry ENV=<env>
+#   make verify-registry ENV=<env>
 #
 
-# [lab]
 # The lab puts ansible-core in .venv (lab/bootstrap.sh). Use it if it's there.
 ifneq ($(wildcard .venv/bin/ansible-playbook),)
   export PATH := $(CURDIR)/.venv/bin:$(PATH)
 endif
 
-# [/lab]
 ENV                 ?=
 HOST                ?=
 INVENTORY            = inventories/$(ENV)/hosts
@@ -53,28 +54,29 @@ ENVS      = $(filter-out connected _template,$(patsubst inventories/%/hosts,%,$(
 help:
 	@echo "harbor-airgap-kit $$(cat VERSION 2>/dev/null)"
 	@echo ""
+	@echo "  Inside an environment, use python3 kit: setup, build, load, verify (python3 kit --help)."
+	@echo "  It checks everything before each playbook. make is for the lab, the checks and packaging."
+	@echo ""
 	@echo "  Anything that touches an environment needs ENV=<$(ENVS)>"
 	@echo ""
 	@echo "  Checks"
 	@echo "    make lint                           yamllint, ansible-lint (production profile), shellcheck"
 	@echo "    make syntax                         syntax-check every playbook against every inventory"
 	@echo ""
-# [lab]
 	@echo "  The lab, all on one machine (docs/LAB.md)"
 	@echo "    make lab-up                         vault, CA, Nexus in Podman, Nexus's repos and accounts"
-	@echo "    make lab-demo [RUNTIME=docker]      run the whole thing: fetch, publish, build, load, verify"
+	@echo "    make lab-run [RUNTIME=docker]      run the whole thing: fetch, publish, build, load, verify"
 	@echo "    make lab-info                       URLs and logins"
 	@echo "    make lab-down                       take Harbor down and stop Nexus, keeping the data"
 	@echo "    make lab-destroy                    remove everything, data included"
 	@echo ""
-# [/lab]
 	@echo "  Transfers (the same as python3 kit ...)"
 	@echo "    make kit-check                      check kit.yml and that every source is reachable"
 	@echo "    make kit-fetch                      build the transfer"
 	@echo "    make kit-publish ENV=.. FROM=..     inside: check the transfer, stage it, upload the Harbor files to Nexus"
 	@echo "    make kit-load ENV=..                inside, after build-registry: push the Broadcom bundles into Harbor"
 	@echo ""
-	@echo "  Harbor"
+	@echo "  Harbor, straight to the playbook (python3 kit build, verify and remove check first)"
 	@echo "    make build-registry ENV=..          install Harbor, or upgrade it to the release in harbor_artifacts.yml"
 	@echo "    make verify-registry ENV=..         read-only health check"
 	@echo "    make remove-registry ENV=..         take Harbor off the server (the data stays)"
@@ -119,9 +121,7 @@ lint:
 	yamllint -c .yamllint .
 	ansible-lint --profile production
 	shellcheck scripts/*.sh
-# [lab]
 	shellcheck lab/*.sh
-# [/lab]
 
 ping: check-env
 	ansible all -i $(INVENTORY) $(VAULT_FLAGS) -m ansible.builtin.ping
@@ -131,11 +131,9 @@ syntax:
 	  ansible-playbook -i inventories/$$e/hosts $$p --syntax-check >/dev/null && echo "ok  $$e  $$p"; \
 	done; done
 	@ansible-playbook -i inventories/connected/hosts stage_harbor_artifacts.yml --syntax-check >/dev/null && echo "ok  connected  stage_harbor_artifacts.yml"
-# [lab]
 	@set -e; for p in lab_up.yml lab_down.yml; do \
 	  ansible-playbook -i inventories/lab/hosts $$p --syntax-check >/dev/null && echo "ok  lab  $$p"; \
 	done
-# [/lab]
 	@set -e; for p in $(PLAYBOOKS); do \
 	  ansible-playbook -i inventories/_template/hosts $$p --syntax-check >/dev/null && echo "ok  _template  $$p"; \
 	done
@@ -174,19 +172,18 @@ remove-registry: check-env
 configure-nexus: check-env
 	ansible-playbook $(APB_FLAGS) configure_nexus.yml
 
-# [lab]
 # --- Lab -----------------------------------------------------------------------------
 LAB_FLAGS = -i inventories/lab/hosts --vault-password-file $(VAULT_PASSWORD_FILE)
 RUNTIME  ?=
-.PHONY: lab-up lab-demo lab-info lab-down lab-destroy
+.PHONY: lab-up lab-run lab-info lab-down lab-destroy
 
 lab-up:
 	bash lab/vault.sh
 	@bash lab/runtime.sh >/dev/null
 	ansible-playbook $(LAB_FLAGS) lab_up.yml $(ARGS)
 
-lab-demo:
-	bash lab/demo.sh $(RUNTIME)
+lab-run:
+	bash lab/run.sh $(RUNTIME)
 
 lab-info:
 	@bash lab/info.sh
@@ -200,7 +197,6 @@ lab-destroy:
 	ansible-playbook $(LAB_FLAGS) lab_down.yml -e lab_nexus_purge_data=true -e lab_pki_remove=true $(ARGS)
 	rm -rf /var/tmp/kit-transfer $(STAGING_DIR)/harbor $(STAGING_DIR)/broadcom
 	rm -f .vault_pass inventories/lab/group_vars/all/vault.yml inventories/lab/group_vars/registry/runtime.yml
-# [/lab]
 
 
 # --- Vault ---------------------------------------------------------------------------

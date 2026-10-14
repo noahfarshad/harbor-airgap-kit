@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# lab/demo.sh - the whole pipeline on the lab machine, with the same commands
-# you'd run in a real environment (make lab-demo): build the transfer, publish
+# lab/run.sh - the whole pipeline on the lab machine, with the same commands
+# you'd run in a real environment (make lab-run): build the transfer, publish
 # it to Nexus, build Harbor, load the Broadcom bundles, verify. Needs make lab-up
 # first.
 #
-#   bash lab/demo.sh [podman|docker]     (make lab-demo RUNTIME=docker)
+#   bash lab/run.sh [podman|docker]     (make lab-run RUNTIME=docker)
 #
 # With a runtime, Harbor moves to it first: taken off the old one, its data
 # kept, and the lab's runtime set (lab/runtime.sh).
@@ -45,14 +45,14 @@ python3 kit --config "$KIT_CONFIG" fetch
 step "2/5  Inside: check the transfer, stage it, upload the Harbor files to Nexus"
 python3 kit publish --from "$TRANSFER" --env "$ENV_NAME"
 
-step "3/5  Inside: build Harbor"
-make build-registry ENV="$ENV_NAME"
+step "3/5  Inside: check, then build Harbor"
+python3 kit build --env "$ENV_NAME"
 
 step "4/5  Inside: load the Broadcom bundles into Harbor"
 python3 kit load --env "$ENV_NAME"
 
 step "5/5  Inside: verify Harbor"
-make verify-registry ENV="$ENV_NAME"
+python3 kit verify --env "$ENV_NAME"
 
 step "Done: the pipeline ran end to end"
 bash lab/info.sh

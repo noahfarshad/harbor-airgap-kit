@@ -25,8 +25,8 @@
         (harbor_runtime_file.content | b64decode | trim) == harbor_container_runtime
     fail_msg: >-
       Harbor is installed on {{ harbor_runtime_file.content | default('') | b64decode | trim }}.
-      Run remove_registry.yml first (make remove-registry; registry data is kept), then deploy
-      with harbor_container_runtime: {{ harbor_container_runtime }}.
+      Run python3 kit remove --env {{ inventory_dir | basename }} first (the images are kept),
+      then build again with harbor_container_runtime: {{ harbor_container_runtime }}.
     quiet: true
 
 - name: Check whether the data volume is its own filesystem

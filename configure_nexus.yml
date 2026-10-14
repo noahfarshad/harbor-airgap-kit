@@ -6,8 +6,7 @@
 # REST calls go from the control host to nexus_url, so this works on any Nexus
 # Repository 3 an admin account can reach.
 #
-# Usage:
-#   make configure-nexus ENV=<env>
+# Usage, only when the environment keeps the Harbor files in a Nexus (nexus_enabled: true):
 #   ansible-playbook -i inventories/<env>/hosts configure_nexus.yml --ask-vault-pass
 #
 # REQUIRED, in inventories/<env>/group_vars/all/:

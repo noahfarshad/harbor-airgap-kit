@@ -1,9 +1,9 @@
 ---
 # inventories/<env>/group_vars/all/vault.yml.example
 #
-# Copy to vault.yml, set real values, then encrypt it:
-#   cp vault.yml.example vault.yml
-#   ansible-vault encrypt inventories/<env>/group_vars/all/vault.yml
+# What vault.yml holds. python3 kit setup --env <env> asks for the passwords and
+# writes vault.yml encrypted, so there's nothing to copy or edit by hand. Run it
+# again after changing Harbor's admin password in the portal.
 #
 # Never commit or carry an unencrypted vault.yml. Each environment creates its own.
 
@@ -19,7 +19,7 @@ vault_harbor_db_password:     "REPLACE-WITH-HARBOR-DATABASE-PASSWORD"
 vault_repo_username:          ""
 vault_repo_password:          ""
 
-# Only for make configure-nexus: the Nexus admin, and the account kit publish
+# Only for configure_nexus.yml: the Nexus admin, and the account kit publish
 # uploads with (kit publish asks for it when NEXUS_USER/NEXUS_PASSWORD are unset).
 # vault_nexus_admin_password:   "REPLACE-WITH-NEXUS-ADMIN-PASSWORD"
 # vault_nexus_upload_user:      "kit-upload"

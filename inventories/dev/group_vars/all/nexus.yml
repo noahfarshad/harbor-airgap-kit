@@ -1,7 +1,7 @@
 ---
 # inventories/dev/group_vars/all/nexus.yml
 #
-# Only for make configure-nexus ENV=<env>: the repositories, roles and accounts
+# Only for configure_nexus.yml, run against <env>: the repositories, roles and accounts
 # the kit needs, created through Nexus's REST API (roles/configure_nexus). Leave
 # this file as it is if the environment's Nexus admin sets them up by hand.
 

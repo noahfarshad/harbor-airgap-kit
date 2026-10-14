@@ -7,8 +7,8 @@ repository each air-gapped environment pulls from (Nexus raw hosted or
 Artifactory generic).
 
 The manifest, `harbor_artifacts.yml`, is what lets each environment verify the
-installer after transfer. `make pull-harbor ENV=<env>` writes it into
-`inventories/<env>/group_vars/registry/`.
+installer after transfer. `scripts/pull_harbor.sh --inventory inventories/<env>`
+writes it into `inventories/<env>/group_vars/registry/`.
 
 Requirements
 ------------

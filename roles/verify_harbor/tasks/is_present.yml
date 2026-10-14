@@ -59,7 +59,7 @@
   ansible.builtin.assert:
     that:
       - item in (harbor_verify_projects.json | map(attribute='name') | list)
-    fail_msg: "Project {{ item }} is missing: the environment's Broadcom items go there. Run make build-registry."
+    fail_msg: "Project {{ item }} is missing: the environment's Broadcom items go there. Run python3 kit build --env {{ inventory_dir | basename }}."
     quiet: true
   loop: "{{ harbor_item_projects }}"
 

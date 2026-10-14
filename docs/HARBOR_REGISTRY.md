@@ -12,10 +12,11 @@ registry, and none of this touches it.
 ```
 Connected workstation (WSL or Linux)    transfer       Each air-gapped environment
 ------------------------------------    --------       ---------------------------
-python3 kit check                  ->   carried   ->   python3 kit publish --env ..   check and stage (Nexus if it's on)
-python3 kit fetch                       across         make build-registry ENV=..     builds from the staged files
+python3 kit choose --env ..        ->   carried   ->   python3 kit publish --env ..   check and stage (Nexus if it's on)
+python3 kit check                       across         python3 kit setup --env ..     settings, certificate, vault
+python3 kit fetch                                      python3 kit build --env ..     checks, then builds from the staged files
   Harbor installer + Sigstore check                    python3 kit load --env ..      Broadcom bundles into Harbor
-  compose provider, Docker CE if wanted                make verify-registry ENV=..
+  compose provider, Docker CE if wanted                python3 kit verify --env ..    checks the registry, any time
   Broadcom items the environments turn on (imgpkg), other files
   a copy of this repo, SHA256SUMS
 ```
@@ -34,7 +35,8 @@ projects and writes copies of the Supervisor Service YAMLs that point at Harbor,
 ready to add in vCenter. `broadcom/README.md` covers it.
 
 If you'd rather build the Harbor files with Ansible on a connected RHEL 9 box
-instead of `kit fetch`, `make stage-harbor` does that part.
+instead of `kit fetch`, `stage_harbor_artifacts.yml` does that part
+(`roles/stage_harbor_artifacts/README.md`).
 
 Each environment has its own inventory and its own vault. Nothing is shared
 between environments.
@@ -51,7 +53,7 @@ between environments.
 | `install_harbor` | Registry server | Unpacks Harbor, writes `harbor.yml`, runs Harbor's prepare step, adapts the compose file for Podman, and adds the systemd units and certificate sync. It also handles in-place upgrades |
 | `configure_harbor_projects` | Registry server | Waits for Harbor to report healthy, then creates `sup-services`, `tanzu-packages` and `tkg`, plus the projects the environment's Broadcom items go to (`vks`, `ako`). `library` comes with Harbor |
 | `verify_harbor` | Registry server | Read-only. Fails on a stopped container, an unhealthy component, a missing project or an expired certificate |
-| `configure_nexus` | Control host | Creates the kit's repos, roles and accounts in Nexus over its REST API (`make configure-nexus`) |
+| `configure_nexus` | Control host | Creates the kit's repos, roles and accounts in Nexus over its REST API (`configure_nexus.yml`) |
 
 Every role takes `desired_state: present | absent`. `build_registry.yml` puts
 Harbor in place. `remove_registry.yml` runs the Harbor roles in reverse with
@@ -59,18 +61,24 @@ Harbor in place. `remove_registry.yml` runs the Harbor roles in reverse with
 
 ## Where the settings go
 
+`python3 kit setup --env <env>` writes the values that differ from one
+environment to the next: the server and how Ansible reaches it, the registry's
+name, the data volume, the certificate, Nexus, the Broadcom items and the vault.
+Everything else has a working default. The table is for reading, not for
+filling in.
+
 | File | What's in it |
 |---|---|
 | `inventories/<env>/group_vars/all/main.yml` | `install_root`, `stage_root`, `artifact_staging`, `enable_firewall` |
 | `inventories/<env>/group_vars/all/environment.yml` | Domain, IdM, vCenter, networks. Facts about the environment, kept in one place |
 | `inventories/<env>/group_vars/all/artifacts.yml` | Where the Harbor files come from: `nexus_enabled` (off: the staging folder), and Nexus's URL and repo names when it's on |
-| `inventories/<env>/group_vars/all/nexus.yml` | Only for `make configure-nexus`: the account names, anonymous access |
+| `inventories/<env>/group_vars/all/nexus.yml` | Only for `configure_nexus.yml`: the account names, anonymous access |
 | `inventories/<env>/group_vars/registry/main.yml` | Runtime, compose provider, projects, TLS mode, ports, `harbor_data_require_mount` |
 | `inventories/<env>/group_vars/registry/harbor_artifacts.yml` | `harbor_version`, `harbor_installer_file`, `harbor_installer_sha256`. `kit publish` writes this one |
 | `inventories/<env>/host_vars/<host>.yml` | `registry_server_fqdn`, `harbor_hostname`, `harbor_data_volume` |
-| `inventories/<env>/group_vars/all/vault.yml` | Harbor's admin and database passwords and the Nexus read account. The Nexus admin and upload accounts too, if you use `make configure-nexus` |
+| `inventories/<env>/group_vars/all/vault.yml` | Harbor's admin and database passwords and the Nexus read account, written and encrypted by `python3 kit setup`. The Nexus admin and upload accounts too, if you use `configure_nexus.yml` |
 | `kit.yml` | What the next transfer carries: Harbor release, compose provider, Docker CE, Broadcom content, other files |
-| `inventories/connected/group_vars/all/stage.yml` | The same idea, for `make stage-harbor` |
+| `inventories/connected/group_vars/all/stage.yml` | The same idea, for `stage_harbor_artifacts.yml` |
 
 ## Before the first build
 
@@ -86,13 +94,14 @@ Harbor in place. `remove_registry.yml` runs the Harbor roles in reverse with
   that issued them, in `<artifact_staging>/tls/` on the control host as
   `<harbor_hostname>.crt`, `<harbor_hostname>.key` and `ca.crt`. The build puts
   them in place and makes the server trust the CA; `kit load` uses the same CA.
+  `python3 kit setup` asks for the three files, checks them (the name, the
+  dates, that the key and the CA belong to the certificate) and stages them.
   On a server enrolled in IdM you can have IdM issue it instead
   (`harbor_tls_mode: ipa`, after `ipa service-add HTTP/<harbor_hostname>`).
 - **Nexus, if you want it.** With `nexus_enabled: true`: a raw (hosted) repo, a
   yum (hosted) repo with repodata depth 0, a read account for Ansible and dnf,
-  and an upload account for `python3 kit publish`. `make configure-nexus
-  ENV=<env>` creates all of it over Nexus's REST API if the Nexus admin
-  password is in the vault (`roles/configure_nexus/README.md`).
+  and an upload account for `python3 kit publish`. `configure_nexus.yml` can
+  create all of it over Nexus's REST API (`roles/configure_nexus/README.md`).
 - **Runtime and compose provider.** On Podman, podman-compose comes from EPEL
   in the transfer. If EPEL isn't allowed, use Docker's compose binary instead:
   `harbor.compose_provider: docker-compose` in `kit.yml` and
@@ -102,14 +111,18 @@ Harbor in place. `remove_registry.yml` runs the Harbor roles in reverse with
   `docker_offline_source: staged`. `python3 kit publish` warns you when the
   transfer doesn't carry what the inventory expects.
 - **The control host.** ansible-core 2.14 or later, nothing else; the
-  playbooks only use `ansible.builtin`. Its account needs sudo on the registry
-  server without a password prompt. If Ansible runs in a container and
+  playbooks only use `ansible.builtin`. Its account logs in to the registry
+  server with an SSH key and uses sudo there; if sudo wants a password, the
+  kit asks for it once per run. Harbor can also go on the control host itself
+  (setup asks). `python3 kit doctor --env <env>` checks all of it. If Ansible runs in a container and
   `artifact_staged_on` is `controller`, mount `artifact_staging` into it.
 
 ## After the first build
 
-1. Change the admin password in the Harbor portal, then put the same value in
-   `vault_harbor_admin_password`. The build only sets it the first time.
+1. Change the admin password in the Harbor portal, then run
+   `python3 kit setup --env <env>` and answer no when it asks to keep the
+   vault's passwords: it asks for the new one. The build only sets it the
+   first time.
 2. If the site has a directory (IdM or AD), point authentication at it over
    LDAP before any local users exist, and leave self-registration off.
 3. Load the Broadcom content: `python3 kit load --env <env>` pushes the items
@@ -125,26 +138,26 @@ Harbor in place. `remove_registry.yml` runs the Harbor roles in reverse with
 
 - **Upgrading Harbor.** Set `harbor.version` in `kit.yml`, run
   `python3 kit fetch`, carry it in, then `python3 kit publish` and
-  `make build-registry`. `install_harbor` sees the new version and follows
+  `python3 kit build`. `install_harbor` sees the new version and follows
   Harbor's upgrade steps: stop, copy the database, unpack, migrate `harbor.yml`,
   redeploy. Check the release notes for how far you can jump, and try it
   somewhere that doesn't matter first.
-- **Certificate renewals.** Stage the new certificate and key in
-  `<artifact_staging>/tls/` and run `make build-registry`; with IdM, certmonger
-  renews in place on its own. Either way `harbor-cert-sync.path` copies the new
-  certificate into Harbor and restarts `nginx`. `make verify-registry` tells you whether the copy Harbor is serving
-  matches the one on disk.
-- **Taking Harbor off.** `make remove-registry ENV=<env>` leaves `/data`,
-  `harbor.yml` and the runtime alone. Add `ARGS="--skip-tags tls"` to keep the
-  certificate too.
-- **Switching runtime.** Remove first, then change `harbor_container_runtime`,
-  then build again. `install_harbor` won't deploy on a different runtime until
+- **Certificate renewals.** Run `python3 kit setup --env <env>`, answer no
+  when it asks to keep the staged certificate, give it the new files, then
+  `python3 kit build --env <env>`. With IdM, certmonger renews in place on its
+  own. Either way `harbor-cert-sync.path` copies the new certificate into
+  Harbor and restarts `nginx`, and `python3 kit verify --env <env>` tells you
+  whether the copy Harbor is serving matches the one on disk.
+- **Taking Harbor off.** `python3 kit remove --env <env>` asks first, then
+  takes Harbor off and leaves `/data`, `harbor.yml` and the runtime alone. Add
+  `--keep-certificate` to keep the certificate too.
+- **Switching runtime.** `python3 kit remove --env <env>` first, then set
+  `harbor_container_runtime` in `group_vars/registry/main.yml`, then
+  `python3 kit build --env <env>`. `install_harbor` won't deploy on a different runtime until
   the remove has run.
 
-<!-- [lab] -->
 - **Trying any of this out.** The lab (`docs/LAB.md`) runs everything on this
   page on one machine, including upgrades and switching runtime.
-<!-- [/lab] -->
 
 ## Why it's built this way
 

@@ -18,7 +18,7 @@ under "After the first build".
   and WSL gets half your RAM by default, which is usually plenty.
 - About 25 GB of disk.
 - Internet access to GitHub, Docker Hub, dl.fedoraproject.org,
-  download.docker.com, projects.packages.broadcom.com, PyPI, Ansible Galaxy and
+  download.docker.com, projects.packages.broadcom.com, PyPI and
   the AlmaLinux mirrors.
 - No accounts. The Broadcom bundles download anonymously. You'd only need a
   Broadcom login to grab Supervisor Service YAMLs from support.broadcom.com in a
@@ -33,7 +33,7 @@ its license agreement for you (`nexus_accept_eula` in
 From this folder, in PowerShell (no admin needed):
 
 ```powershell
-PowerShell -ExecutionPolicy Bypass -File .\lab\windows\New-HarborLab.ps1 -Demo
+PowerShell -ExecutionPolicy Bypass -File .\lab\windows\New-HarborLab.ps1 -RunPipeline
 ```
 
 Here's what that does:
@@ -45,9 +45,9 @@ Here's what that does:
    `/etc/hosts`.
 3. Copies this folder to `/opt/harbor-airgap-kit` inside it.
 4. Runs `lab/bootstrap.sh`, which installs Python 3.12, Podman and a few tools,
-   puts ansible-core 2.21 and the collections in `.venv`, and runs `make lab-up`
+   puts ansible-core 2.21 in `.venv`, and runs `make lab-up`
    (vault, CA, Nexus, and Nexus's repos and accounts).
-5. With `-Demo`, runs `make lab-demo` (below). Add `-Runtime docker` to build
+5. With `-RunPipeline`, runs `make lab-run` (below). Add `-Runtime docker` to build
    Harbor on Docker CE instead of Podman.
 
 The first run takes 15 to 20 minutes, mostly downloads. Run the script again
@@ -59,11 +59,9 @@ After that:
 
 ```powershell
 wsl -d harbor-lab                                                        # root shell in the lab
-wsl -d harbor-lab -- make -C /opt/harbor-airgap-kit lab-demo
-wsl -d harbor-lab -- make -C /opt/harbor-airgap-kit lab-demo RUNTIME=docker
-wsl -d harbor-lab -- make -C /opt/harbor-airgap-kit lab-demo RUNTIME=podman
+wsl -d harbor-lab -- make -C /opt/harbor-airgap-kit lab-run
+wsl -d harbor-lab -- make -C /opt/harbor-airgap-kit lab-run RUNTIME=docker
 wsl -d harbor-lab -- make -C /opt/harbor-airgap-kit lab-info
-wsl --terminate harbor-lab
 ```
 
 WSL normally stops a distribution about 15 seconds after the last command
@@ -103,12 +101,10 @@ On AlmaLinux, Rocky or RHEL 9, as root, from this folder:
 
 ```bash
 bash lab/bootstrap.sh
-make lab-demo
-make lab-demo RUNTIME=docker
-make lab-demo RUNTIME=podman
+make lab-run                  # or: make lab-run RUNTIME=docker
 ```
 
-## What lab-demo does
+## What lab-run does
 
 1. `python3 kit --config kits/lab.yml check`, then `fetch`. Checks every
    source, verifies Harbor's Sigstore signature and the checksums for
@@ -117,39 +113,45 @@ make lab-demo RUNTIME=podman
 2. `python3 kit publish --from /var/tmp/kit-transfer/lab-harbor-2.15.2 --env lab`.
    Checks the transfer again, makes sure it has what the inventory expects,
    stages it, and uploads the Harbor files to Nexus with the upload account.
-3. `make build-registry ENV=lab`. Builds Harbor from Nexus with the read
-   account: runtime, installer, certificate, systemd units, projects, checks.
+3. `python3 kit build --env lab`. Checks what would stop the build (Ansible,
+   sudo, the vault, the certificate against the lab CA), then builds Harbor
+   from Nexus with the read account: runtime, installer, certificate, systemd
+   units, projects, checks.
 4. `python3 kit load --env lab`. Pushes the lab's Broadcom items into their
    Harbor projects over TLS, trusting the lab CA.
-5. `make verify-registry ENV=lab`. Every container running, Harbor healthy, the
+5. `python3 kit verify --env lab`. Every container running, Harbor healthy, the
    projects there, the certificate valid.
 
 `RUNTIME=docker` first takes Harbor off Podman (keeping its data), then runs the
 same five steps with Harbor on Docker CE, installed from the RPMs in the
-transfer. `RUNTIME=podman` moves it back. Run `make build-registry ENV=lab` a
+transfer. `RUNTIME=podman` moves it back. Run `python3 kit build --env lab` a
 second time on either one and it should report no changes.
+
+These are the commands an environment runs. `python3 kit doctor --env lab`
+shows the checks on their own, and `python3 kit setup --env lab` walks through
+the questions with the lab's answers already filled in (Enter keeps each one).
 
 ## Making it look like a real environment
 
 - More or less Broadcom content: turn items on or off in
   `inventories/lab/group_vars/registry/broadcom.yml` (it starts with Argo CD,
-  Contour and AKO) and run `make lab-demo` again. `python3 kit catalog` lists
+  Contour and AKO) and run `make lab-run` again. `python3 kit catalog` lists
   what's there.
 - podman-compose instead of docker-compose: set `compose_provider:
   podman-compose` in `kits/lab.yml` and `harbor_podman_compose_provider:
   podman-compose` in `inventories/lab/group_vars/registry/main.yml`. Nexus's
   yum repo then serves the EPEL packages.
 - A different Harbor release: change `harbor.version` in `kits/lab.yml` and run
-  `make lab-demo`. `install_harbor` follows Harbor's own upgrade steps.
+  `make lab-run`. `install_harbor` follows Harbor's own upgrade steps.
 - A real environment's settings: copy the choices from its
   `group_vars/registry/main.yml` into `inventories/lab/`, keeping the lab's
-  certificate, data disk and SELinux lines, and run `make lab-demo`.
+  certificate, data disk and SELinux lines, and run `make lab-run`.
 
 ## Day to day
 
 ```
 make lab-up                       build or fix the lab's CA and Nexus; safe to rerun
-make lab-demo [RUNTIME=docker]    the whole pipeline
+make lab-run [RUNTIME=docker]    the whole pipeline
 make lab-info                     URLs, the runtime, and the logins
 make lab-down                     take Harbor down and stop Nexus, keeping the data
 make lab-destroy                  everything: Harbor and Nexus data, CA, vault, transfers
@@ -179,5 +181,5 @@ make lab-destroy                  everything: Harbor and Nexus data, CA, vault, 
   does, Windows isn't forwarding to WSL. Make sure `localhostForwarding` isn't
   set to `false` in `.wslconfig`, or put the lab's own address
   (`wsl -d harbor-lab hostname -I`) in the hosts file instead of 127.0.0.1.
-- **`make lab-demo` stops partway.** Fix whatever that step complains about and
+- **`make lab-run` stops partway.** Fix whatever that step complains about and
   run it again. Every step can be rerun.
